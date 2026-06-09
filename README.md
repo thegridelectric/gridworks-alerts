@@ -43,6 +43,7 @@ Wants=network-online.target
 Type=simple
 User=ubuntu
 WorkingDirectory=/home/ubuntu/gridworks-alerts
+Environment=PYTHONUNBUFFERED=1
 ExecStart=/home/ubuntu/gridworks-alerts/.venv/bin/gwalert
 Restart=on-failure
 RestartSec=30
