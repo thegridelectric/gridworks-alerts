@@ -282,13 +282,6 @@ class AlertGenerator:
             snapshot=snapshot,
         )
 
-    def _reset_cycle_data(self) -> None:
-        self.reports = []
-        self.layout_lites = []
-        self.selected_house_aliases = []
-        self.data = {}
-        self.relays = {}
-
     def get_data_from_journaldb(self):
         print("\nFinding data from journaldb...")
         time_now = self.reference_now()
@@ -310,7 +303,6 @@ class AlertGenerator:
                     raise Exception("No messages found.")
         except Exception as e:
             print(f"An error occured while getting data from journaldb: {e}")
-            self._reset_cycle_data()
             return
         
         report_messages = [
