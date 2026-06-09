@@ -14,13 +14,9 @@ Create `/home/ubuntu/gridworks-alerts/.env` from `.env.example`. All variables u
 
 | Variable | Purpose |
 |----------|---------|
-| `GWALERT_DB_URL` | SQLAlchemy URL for the telemetry database |
+| `GWALERT_DB_URL` | SQLAlchemy URL for the journaldb database |
 | `GWALERT_GBO_DB_URL` | SQLAlchemy URL for the backoffice database |
 | `GWALERT_OPS_GENIE_API_KEY` | API key for OpsGenie notifications |
-| `GWALERT_EMAIL_SENDER` | SMTP sender (optional) |
-| `GWALERT_EMAIL_PASSWORD` | SMTP password (optional) |
-
-When migrating from `gridworks-journalkeeper`, rename `GJK_*` variables to `GWALERT_*`.
 
 ## EC2 setup
 
