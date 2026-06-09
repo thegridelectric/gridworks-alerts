@@ -93,6 +93,9 @@ class AlertGenerator:
         self.simulated_reference_time = pendulum.parse('2026-05-20T04:20:00-04:00')
         self.critical_zones_by_house = {}
         self.houses_in_standby = []
+        self.reports: list[ParsedReport] = []
+        self.layout_lites: list[ParsedLayoutLite] = []
+        self.selected_house_aliases: list[str] = []
         self.data = {}
         self.relays = {}
         self.spruce_snapshots: list[ParsedSnapshotSpaceheat] = []
@@ -279,6 +282,13 @@ class AlertGenerator:
             snapshot=snapshot,
         )
 
+    def _reset_cycle_data(self) -> None:
+        self.reports = []
+        self.layout_lites = []
+        self.selected_house_aliases = []
+        self.data = {}
+        self.relays = {}
+
     def get_data_from_journaldb(self):
         print("\nFinding data from journaldb...")
         time_now = self.reference_now()
@@ -300,6 +310,7 @@ class AlertGenerator:
                     raise Exception("No messages found.")
         except Exception as e:
             print(f"An error occured while getting data from journaldb: {e}")
+            self._reset_cycle_data()
             return
         
         report_messages = [
@@ -1166,7 +1177,7 @@ class AlertGenerator:
                 # self.check_no_more_oil()
                 self.check_alert_status()
             except Exception as e:
-                print(e)
+                print(f"Error in alert loop: {e}")
             time.sleep(self.main_loop_seconds)
 
 
