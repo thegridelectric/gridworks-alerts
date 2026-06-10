@@ -14,6 +14,9 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 from pydantic import BaseModel
 
 SIMULATING = False
+SIMULATING_REFERENCE_TIME = pendulum.parse('2026-06-10T00:21:00-04:00')
+if SIMULATING:
+    print(f"SIMULATING RUN AT {SIMULATING_REFERENCE_TIME}")
 
 Base = declarative_base()
 
@@ -90,7 +93,7 @@ class AlertGenerator:
         self.min_hp_kw = 1
         self.on_peak_hours = [7,8,9,10,11,16,17,18,19]
         self.whitewire_threshold_watts = {'beech': 100, 'default': 20, 'elm': 0.9}
-        self.simulated_reference_time = pendulum.parse('2026-05-20T04:20:00-04:00')
+        self.simulated_reference_time = SIMULATING_REFERENCE_TIME
         self.critical_zones_by_house = {}
         self.houses_in_standby = []
         self.reports: list[ParsedReport] = []
@@ -345,7 +348,8 @@ class AlertGenerator:
                 self.houses_in_standby.remove(parsed.house_alias)
                 print(f"Removing {parsed.house_alias} from the list of houses in standby")
         all_house_aliases = list({x.house_alias for x in self.reports})
-        self.selected_house_aliases = [x for x in all_house_aliases if x not in self.ignored_house_aliases and x in ['beech', 'oak', 'fir', 'maple', 'elm']]
+        self.selected_house_aliases = [x for x in all_house_aliases if x not in self.ignored_house_aliases]
+        print(f"Selected house aliases: {self.selected_house_aliases}")
 
         for house_alias in all_house_aliases:
             self.data[house_alias] = {}
@@ -718,7 +722,7 @@ class AlertGenerator:
             for zone_state in [x for x in self.data[house_alias] if 'zone' in x and 'whitewire' in x]:
                 channel = self.data[house_alias][zone_state]
                 channel['values'] = [int(abs(x)>threshold) for x in channel['values']]
-                min_heatcall_ms = 3 * 60 * 1000
+                min_heatcall_ms = 15 * 60 * 1000
                 pairs = list(zip(channel['times'], channel['values']))
                 zone_heatcall_times = []
                 i = 0
