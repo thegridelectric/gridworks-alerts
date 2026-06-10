@@ -2,6 +2,8 @@
 
 Monitors GridWorks residential heating systems and raises alerts for potential system faults.
 
+See [docs/alerts.md](docs/alerts.md) for alert definitions, triggers, and thresholds.
+
 ## Requirements
 
 - Python 3.12
