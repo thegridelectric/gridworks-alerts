@@ -559,19 +559,6 @@ class AlertGenerator:
             self.alert_status['spruce'][alert_alias] = False
 
     def check_zone_below_setpoint(self):
-        print("\nChecking for zones below setpoint...")
-        house_alias = 'elm'
-        zone = 'zone1-first'
-        alert_alias = 'zone_setpoint'
-        alert_alias_full = f"{alert_alias}_{zone}"
-        if self.alert_status.get(house_alias, {}).get(alert_alias, {}).get(zone):
-            return
-        alert_message = f"{house_alias}: {zone} is significantly below setpoint"
-        self.send_alert(alert_message, house_alias, alert_alias_full)
-        if alert_alias not in self.alert_status[house_alias]:
-            self.alert_status[house_alias][alert_alias] = {}
-        self.alert_status[house_alias][alert_alias][zone] = True
-        return
         alert_alias = "zone_setpoint"
         print("\nChecking for zones below setpoint...")
         for house_alias in self.selected_house_aliases:
