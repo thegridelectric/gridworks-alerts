@@ -22,7 +22,7 @@ dependencies = [
 
 [project.scripts]
 gwalert = "gwalert.alert_generator:main"
-gwalert-sheet = "gwalert.read_sheet:main"
+gwalert-sheet = "gwalert.google_sheet_reader:main"
 
 [project.urls]
 Homepage = "https://github.com/thegridelectric/gridworks-alerts"

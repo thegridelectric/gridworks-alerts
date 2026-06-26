@@ -14,7 +14,6 @@ class Settings(BaseSettings):
         "postgresql+psycopg2://journaldb:journaldb@localhost:5433/backofficedb_dev"
     )
     telegram_bot_token: SecretStr = SecretStr("")
-    google_sheets_credentials_path: str = ""
     google_sheets_spreadsheet_id: str = ""
 
     model_config = SettingsConfigDict(

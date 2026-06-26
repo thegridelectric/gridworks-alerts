@@ -1,16 +1,18 @@
 import json
 import time
+from typing import NamedTuple
+
 import dotenv
 import pendulum
 import requests
-from pathlib import Path
+from pydantic import BaseModel
+from sqlalchemy import asc, or_
+
 from gwalert.config import DEFAULT_ENV_FILE, Settings
 from gwalert.db import configure, get_db
 from gwalert.models import MessageSql
+from gwalert.google_sheet_reader import read_google_sheet, schedule_json_path
 from gwalert.types import Glitch, LayoutLite, Report, SnapshotSpaceheat
-from sqlalchemy import asc, or_
-from typing import NamedTuple
-from pydantic import BaseModel
 
 SIMULATING = False
 SIMULATING_REFERENCE_TIME = pendulum.parse('2026-06-10T00:21:00-04:00')
@@ -86,6 +88,7 @@ class AlertGenerator:
         self.main()
 
     def send_alert(self, message, house_alias, alert_alias):
+        read_google_sheet()
         print(f"[ALERT] {message}")
         full_alias = f"{pendulum.now(tz=self.timezone_str).format('YYYY-MM-DD')}-{house_alias}-{alert_alias}"
 
@@ -127,8 +130,7 @@ class AlertGenerator:
     def get_alert_recipients(self, alert_count: int) -> list[str]:
         alert_time = pendulum.now(tz=self.timezone_str)
 
-        env_file = dotenv.find_dotenv(DEFAULT_ENV_FILE)
-        schedule_path = Path(env_file).parent / "schedule.json" if env_file else Path("schedule.json")
+        schedule_path = schedule_json_path()
         with schedule_path.open(encoding="utf-8") as schedule_file:
             oncall_data = json.load(schedule_file)
         schedule = oncall_data.get("schedule", {})

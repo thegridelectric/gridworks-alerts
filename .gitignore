@@ -32,7 +32,7 @@ coverage.xml
 !.env.example
 google-credentials.json
 *-service-account*.json
-schedule.json
+google-sheet.json
 
 # Editors
 .idea/
