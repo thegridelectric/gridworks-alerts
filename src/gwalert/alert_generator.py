@@ -3,22 +3,19 @@ import time
 import dotenv
 import pendulum
 import requests
+from pathlib import Path
 from gwalert.config import DEFAULT_ENV_FILE, Settings
 from gwalert.db import configure, get_db
 from gwalert.models import MessageSql
 from gwalert.types import Glitch, LayoutLite, Report, SnapshotSpaceheat
 from sqlalchemy import asc, or_
-from sqlalchemy import create_engine, Column, String, JSON, Integer
-from typing import NamedTuple, Optional
-from sqlalchemy.orm import declarative_base, sessionmaker
+from typing import NamedTuple
 from pydantic import BaseModel
 
 SIMULATING = False
 SIMULATING_REFERENCE_TIME = pendulum.parse('2026-06-10T00:21:00-04:00')
 if SIMULATING:
     print(f"SIMULATING RUN AT {SIMULATING_REFERENCE_TIME}")
-
-Base = declarative_base()
 
 
 class ParsedLayoutLite(NamedTuple):
@@ -43,41 +40,21 @@ class ParsedSnapshotSpaceheat(NamedTuple):
     snapshot: SnapshotSpaceheat
 
 
-class House(Base):
-    __tablename__ = 'homes'
-    short_alias = Column(String, nullable=False)
-    address = Column(JSON, nullable=False)
-    primary_contact = Column(JSON, nullable=False)
-    secondary_contact = Column(JSON, nullable=False)
-    hardware_layout = Column(JSON, nullable=True)
-    unique_id = Column(Integer, primary_key=True)
-    g_node_alias = Column(String, nullable=False)
-    status = Column(JSON, nullable=False)
+class AlertSend(BaseModel):
+    recipients: list[str]
+    sent_at: int
 
-class HouseStatus(BaseModel):
-    status: str
-    message: Optional[str] = None
-    acked: Optional[bool] = None
-    acked_by: Optional[str] = None
-    acked_at: Optional[str] = None
 
-    def to_dict(self):
-        return {
-            "status": self.status,
-            "message": self.message,
-            "acked": self.acked,
-            "acked_by": self.acked_by,
-            "acked_at": self.acked_at
-        }
-    
-    @classmethod
-    def from_dict(cls, data):
-        return cls(**data)
-    
+class Alert(BaseModel):
+    count: int = 1
+    sends: list[AlertSend] = []
+    message: str
+    house_alias: str
+    alert_alias: str
+
 
 class AlertGenerator:
     def __init__(self):
-        self.opsgenie_team_id = "edaccf48-a7c9-40b7-858a-7822c6f862a4"
         self.settings = Settings(_env_file=dotenv.find_dotenv(DEFAULT_ENV_FILE))
         configure(self.settings)
         self.timezone_str = 'America/New_York'
@@ -103,108 +80,120 @@ class AlertGenerator:
         self.relays = {}
         self.spruce_snapshots: list[ParsedSnapshotSpaceheat] = []
         self.alert_status = {}
-        self.houses_with_an_active_alert = []
+        self.active_telegram_alerts: dict[str, Alert] = {}
+        self.telegram_update_offset = 0
+        self.max_alert_count = 6
         self.main()
 
-    def update_alert_status(self, message, short_alias, clear_alert=False):
-        if clear_alert:
-            new_house_data = {
-                "status": HouseStatus(
-                    status = "ok",
-                ).to_dict()
-            }
+    def send_alert(self, message, house_alias, alert_alias):
+        print(f"[ALERT] {message}")
+        full_alias = f"{pendulum.now(tz=self.timezone_str).format('YYYY-MM-DD')}-{house_alias}-{alert_alias}"
+
+        if full_alias not in self.active_telegram_alerts:
+            self.active_telegram_alerts[full_alias] = Alert(
+                message=message,
+                house_alias=house_alias,
+                alert_alias=alert_alias,
+            )
+        elif self.active_telegram_alerts[full_alias].count < self.max_alert_count:
+            self.active_telegram_alerts[full_alias].count += 1
         else:
-            new_house_data = {
-                "status": HouseStatus(
-                    status = "alert",
-                    message = message,
-                    acked = False
-                ).to_dict()
-            }
+            return
 
-        backoffice_db_url = self.settings.gbo_db_url.get_secret_value()
-        engine = create_engine(backoffice_db_url)
-        Session = sessionmaker(bind=engine)
-        session = Session()
+        count = self.active_telegram_alerts[full_alias].count
+        recipients = self.get_alert_recipients(alert_count=count)
+        if not recipients:
+            print(f"Skipping telegram alert {full_alias}: no recipients resolved")
+            return
 
-        try:
-            # Find the house by short_alias
-            house = session.query(House).filter(House.short_alias == short_alias).first()
-            
-            if not house:
-                print(f"House with short_alias '{short_alias}' not found.")
-                return False
-            
-            # Update the house with new data
-            for key, value in new_house_data.items():
-                if hasattr(house, key):
-                    setattr(house, key, value)
-            
-            # Commit the changes
-            session.commit()
-            return True
-            
-        except Exception as e:
-            print(f"Error updating house: {e}")
-            session.rollback()
-            return False
-        
-        finally:
-            session.close()
+        url = f"https://api.telegram.org/bot{self.settings.telegram_bot_token.get_secret_value()}/sendMessage"
+        sent_to: list[str] = []
+        for chat_id in recipients:
+            response = requests.post(url, json={"chat_id": chat_id, "text": message})
+            if response.status_code == 200:
+                sent_to.append(chat_id)
+            else:
+                print(
+                    f"Failed to send telegram alert to {chat_id}: "
+                    f"{response.status_code}, {response.text}"
+                )
 
-    def send_email_alert(self, message, house_alias):
-        import smtplib
-        from email.mime.text import MIMEText
-        from email.mime.multipart import MIMEMultipart
-        
-        sender_email = self.settings.email_sender.get_secret_value()
-        sender_password = self.settings.email_password.get_secret_value()
-        receiver_email = self.settings.email_sender.get_secret_value()
-        
-        msg = MIMEMultipart()
-        msg['From'] = sender_email
-        msg['To'] = receiver_email
-        msg['Subject'] = f"ALERT - {message}"
-        
-        body = f"{message}"
-        msg.attach(MIMEText(body, 'plain'))
-        
-        try:
-            server = smtplib.SMTP('smtp.gmail.com', 587)
-            server.starttls()
-            server.login(sender_email, sender_password)
-            text = msg.as_string()
-            server.sendmail(sender_email, receiver_email, text)
-            server.quit()
-            print(f"Email alert sent successfully to {receiver_email}")
-        except Exception as e:
-            print(f"Failed to send email alert: {e}")
+        if sent_to:
+            self.active_telegram_alerts[full_alias].sends.append(
+                AlertSend(recipients=sent_to, sent_at=int(time.time()))
+            )
+            print(f"Telegram alert {full_alias} sent to {len(sent_to)} recipient(s)")
 
-    def send_opsgenie_alert(self, message, house_alias, alert_alias, unique_alias=False, priority="P1"):
-        # self.update_alert_status(message, house_alias)
-        # self.send_email_alert(message, house_alias)
-        print(f"- [ALERT] {message}")
-        url = "https://api.opsgenie.com/v2/alerts"
-        headers = {
-            "Content-Type": "application/json",
-            "Authorization": f"GenieKey {self.settings.ops_genie_api_key.get_secret_value()}",
-        }
-        responders = [{"type": "team", "id": self.opsgenie_team_id}]
-        alias = f"{pendulum.now(tz=self.timezone_str).format('YYYY-MM-DD')}-{house_alias}-{alert_alias}"
-        if unique_alias:
-            alias = f"{pendulum.now(tz=self.timezone_str).format('YYYY-MM-DD-HH-mm')}-{house_alias}-{alert_alias}"
-        payload = {
-            "message": message,
-            "alias": alias,
-            "priority": priority,
-            "responders": responders,
-        }
-        response = requests.post(url, headers=headers, data=json.dumps(payload))
-        if response.status_code == 202:
-            print("Alert sent successfully")
-        else:
-            print(f"Failed to send alert. Status code: {response.status_code}, Response: {response.text}")
+    def get_alert_recipients(self, alert_count: int) -> list[str]:
+        alert_time = pendulum.now(tz=self.timezone_str)
 
+        env_file = dotenv.find_dotenv(DEFAULT_ENV_FILE)
+        schedule_path = Path(env_file).parent / "schedule.json" if env_file else Path("schedule.json")
+        with schedule_path.open(encoding="utf-8") as schedule_file:
+            oncall_data = json.load(schedule_file)
+        schedule = oncall_data.get("schedule", {})
+        contacts = oncall_data.get("contacts", {})
+
+        if alert_count > 3:
+            recipients = [str(chat_id) for chat_id in contacts.values() if chat_id]
+            print(f"Escalation: sending to all {len(recipients)} contact(s)")
+            return recipients
+
+        names = schedule.get(str(alert_time.weekday()), {}).get(str(alert_time.hour), [])
+
+        if not names:
+            return []
+
+        recipients: list[str] = []
+        for name in names:
+            chat_id = contacts.get(name, "")
+            if chat_id:
+                recipients.append(str(chat_id))
+            else:
+                print(f"No Telegram chat ID configured for {name}")
+
+        print(f"On-call: {', '.join(names)} -> {len(recipients)} recipient(s)")
+        return recipients
+
+    def check_telegram_alerts(self):
+        print(f"\nChecking active alerts...")
+        print(f"There are {len(self.active_telegram_alerts)} active alerts.")
+        if not self.active_telegram_alerts:
+            return            
+
+        url = f"https://api.telegram.org/bot{self.settings.telegram_bot_token.get_secret_value()}/getUpdates"
+        response = requests.get(url, params={"offset": self.telegram_update_offset, "timeout": 0})
+        replies_by_chat: dict[str, list[int]] = {}
+        if response.status_code == 200:
+            for update in response.json().get("result", []):
+                self.telegram_update_offset = update["update_id"] + 1
+                msg = update.get("message") or update.get("edited_message")
+                if not msg or msg.get("from", {}).get("is_bot"):
+                    continue
+                chat_id = str(msg["chat"]["id"])
+                replies_by_chat.setdefault(chat_id, []).append(msg["date"])
+
+        for full_alert_alias, alert in list(self.active_telegram_alerts.items()):
+            acknowledged = False
+            for sent in alert.sends:
+                for recipient in sent.recipients:
+                    reply_times = replies_by_chat.get(str(recipient), [])
+                    if any(t >= sent.sent_at for t in reply_times):
+                        acknowledged = True
+                        break
+                if acknowledged:
+                    break
+
+            if acknowledged:
+                print(f"Telegram alert {full_alert_alias} acknowledged")
+                self.active_telegram_alerts.pop(full_alert_alias)
+            else:
+                self.send_alert(
+                    alert.message,
+                    alert.house_alias,
+                    alert.alert_alias,
+                )
+        
     def unix_ms_to_date(self, time_ms):
         return pendulum.from_timestamp(time_ms/1000, tz=self.timezone_str).replace(microsecond=0)
 
@@ -503,7 +492,7 @@ class AlertGenerator:
                         and unique_id
                         not in self.alert_status[house_alias][alert_alias]
                     ):
-                        self.send_opsgenie_alert(
+                        self.send_alert(
                             f"{house_alias} - critical glitch: {summary}",
                             house_alias,
                             alert_alias,
@@ -530,13 +519,13 @@ class AlertGenerator:
             if not self.data[house_alias]:
                 if not self.alert_status[house_alias][alert_alias]:
                     alert_message = f"{house_alias}: No data found in the last {self.hours_back} hour(s)"
-                    self.send_opsgenie_alert(alert_message, house_alias, alert_alias)
+                    self.send_alert(alert_message, house_alias, alert_alias)
                     self.alert_status[house_alias][alert_alias] = True
 
             elif self.reference_epoch() - most_recent_ms/1000 > self.max_time_no_data:
                 if not self.alert_status[house_alias][alert_alias]:
                     alert_message = f"{house_alias}: No data coming in since {round((self.reference_epoch()-most_recent_ms/1000)/60,1)} minutes"
-                    self.send_opsgenie_alert(alert_message, house_alias, alert_alias)
+                    self.send_alert(alert_message, house_alias, alert_alias)
                     self.alert_status[house_alias][alert_alias] = True
 
             else:
@@ -556,13 +545,13 @@ class AlertGenerator:
         if not self.spruce_snapshots:
             if not self.alert_status['spruce'][alert_alias]:
                 alert_message = f"{'spruce'}: No data found in the last 10 minutes"
-                self.send_opsgenie_alert(alert_message, 'spruce', alert_alias)
+                self.send_alert(alert_message, 'spruce', alert_alias)
                 self.alert_status['spruce'][alert_alias] = True
             
         elif self.reference_epoch() - most_recent_ms/1000 > self.max_time_no_data:
             if not self.alert_status['spruce'][alert_alias]:
                 alert_message = f"{'spruce'}: No data coming in since {round((self.reference_epoch()-most_recent_ms/1000)/60,1)} minutes"
-                self.send_opsgenie_alert(alert_message, 'spruce', alert_alias)
+                self.send_alert(alert_message, 'spruce', alert_alias)
                 self.alert_status['spruce'][alert_alias] = True
 
         else:
@@ -570,6 +559,19 @@ class AlertGenerator:
             self.alert_status['spruce'][alert_alias] = False
 
     def check_zone_below_setpoint(self):
+        print("\nChecking for zones below setpoint...")
+        house_alias = 'elm'
+        zone = 'zone1-first'
+        alert_alias = 'zone_setpoint'
+        alert_alias_full = f"{alert_alias}_{zone}"
+        if self.alert_status.get(house_alias, {}).get(alert_alias, {}).get(zone):
+            return
+        alert_message = f"{house_alias}: {zone} is significantly below setpoint"
+        self.send_alert(alert_message, house_alias, alert_alias_full)
+        if alert_alias not in self.alert_status[house_alias]:
+            self.alert_status[house_alias][alert_alias] = {}
+        self.alert_status[house_alias][alert_alias][zone] = True
+        return
         alert_alias = "zone_setpoint"
         print("\nChecking for zones below setpoint...")
         for house_alias in self.selected_house_aliases:
@@ -642,7 +644,7 @@ class AlertGenerator:
                     if len(set(self.data[house_alias][setpoint_channel]["values"])) == 1:
                         if not self.alert_status[house_alias][alert_alias][zone]:
                             alert_message = f"{house_alias}: {setpoint_channel.replace('-set','')} is significantly below setpoint"
-                            self.send_opsgenie_alert(alert_message, house_alias, alert_alias+f"_{zone}")
+                            self.send_alert(alert_message, house_alias, alert_alias+f"_{zone}")
                             self.alert_status[house_alias][alert_alias][zone] = True
                     else:
                         setpoint_values = [x/1000 for x in self.data[house_alias][setpoint_channel]["values"]]
@@ -651,7 +653,7 @@ class AlertGenerator:
                         else:
                             if not self.alert_status[house_alias][alert_alias][zone]:
                                 alert_message = f"{house_alias}: {setpoint_channel.replace('-set','')} is significantly below setpoint"
-                                self.send_opsgenie_alert(alert_message, house_alias, alert_alias+f"_{zone}")
+                                self.send_alert(alert_message, house_alias, alert_alias+f"_{zone}")
                                 self.alert_status[house_alias][alert_alias][zone] = True
     
     def check_zone_freezing(self):
@@ -697,7 +699,7 @@ class AlertGenerator:
                 else:                    
                     if not self.alert_status[house_alias][alert_alias][zone]:
                         alert_message = f"{house_alias}: {zone} is below 40F"
-                        self.send_opsgenie_alert(alert_message, house_alias, alert_alias+f"_{zone}")
+                        self.send_alert(alert_message, house_alias, alert_alias+f"_{zone}")
                         self.alert_status[house_alias][alert_alias][zone] = True
 
     def check_dist_pump(self):
@@ -813,7 +815,7 @@ class AlertGenerator:
                     alert_message += ", but found pump power"
                 else:
                     alert_message += ", and no pump power found"
-                self.send_opsgenie_alert(alert_message, house_alias, alert_alias)
+                self.send_alert(alert_message, house_alias, alert_alias)
     
     def check_store_pump(self):
         alert_alias = "store_pump"
@@ -890,7 +892,7 @@ class AlertGenerator:
                             alert_message += ", but found pump power"
                         else:
                             alert_message += ", and no pump power found"
-                        self.send_opsgenie_alert(alert_message, house_alias, alert_alias)
+                        self.send_alert(alert_message, house_alias, alert_alias)
                         self.alert_status[house_alias][alert_alias] = True
             
             elif relay9_state == "RelayOpen":
@@ -997,7 +999,7 @@ class AlertGenerator:
                 print(f"-- The HP is on")
             elif not self.alert_status[house_alias][alert_alias]:
                 alert_message = f"{house_alias}: The HP is not coming on"
-                self.send_opsgenie_alert(alert_message, house_alias, alert_alias)
+                self.send_alert(alert_message, house_alias, alert_alias)
                 self.alert_status[house_alias][alert_alias] = True
         
     def check_in_atn(self):
@@ -1028,7 +1030,7 @@ class AlertGenerator:
                 self.alert_status[house_alias][alert_alias] = False
 
             elif current_relay5_boss == 'auto.lc.n.relay5' and not self.alert_status[house_alias][alert_alias]:
-                self.send_opsgenie_alert(f"{house_alias}: Not in Atn!", house_alias, alert_alias)
+                self.send_alert(f"{house_alias}: Not in Atn!", house_alias, alert_alias)
                 self.alert_status[house_alias][alert_alias] = True
 
     def check_hp_on_during_onpeak(self):
@@ -1060,7 +1062,7 @@ class AlertGenerator:
                         continue
                     if not self.alert_status[house_alias][alert_alias]:
                         alert_message = f"{house_alias}: HP was seen on at {time_dt}, which is during onpeak"
-                        self.send_opsgenie_alert(alert_message, house_alias, alert_alias+f"_{time_dt.hour}")
+                        self.send_alert(alert_message, house_alias, alert_alias+f"_{time_dt.hour}")
                         self.alert_status[house_alias][alert_alias] = True
                         sent_alert = True
             
@@ -1097,7 +1099,7 @@ class AlertGenerator:
                         print(f"- {house_alias}: Rebooting detected")
                         alert_message = f"{house_alias}: Rebooting detected"
                         if not self.alert_status[house_alias][alert_alias]:
-                            self.send_opsgenie_alert(alert_message, house_alias, alert_alias)
+                            self.send_alert(alert_message, house_alias, alert_alias)
                             self.alert_status[house_alias][alert_alias] = True
                         break
                 if not reboot_detected:
@@ -1127,7 +1129,7 @@ class AlertGenerator:
                 
                     if not self.alert_status[house_alias][alert_alias]:
                         alert_message = f"{house_alias}: Oil boiler is on but is not heating the buffer"
-                        self.send_opsgenie_alert(alert_message, house_alias, alert_alias)
+                        self.send_alert(alert_message, house_alias, alert_alias)
                         self.alert_status[house_alias][alert_alias] = True
                         sent_alert = True
             
@@ -1135,29 +1137,11 @@ class AlertGenerator:
                 print(f"- {house_alias}: Oil boiler is doing fine")
                 self.alert_status[house_alias][alert_alias] = False
 
-    def check_alert_status(self):
-        print("\nChecking alert status...")
-        for house_alias in self.selected_house_aliases:
-            house_has_an_active_alert = self.check_dict_for_true(self.alert_status[house_alias])
-            if house_has_an_active_alert:
-                print(f"{house_alias}: An alert is active")
-                if house_alias not in self.houses_with_an_active_alert:
-                    self.houses_with_an_active_alert.append(house_alias)
-            elif house_alias in self.houses_with_an_active_alert:
-                print(f"{house_alias}: No more active alert, clearing any existing alerts")
-                # self.update_alert_status(message="", short_alias=house_alias, clear_alert=True)
-                self.houses_with_an_active_alert.remove(house_alias)
-            else:
-                print(f"{house_alias}: No active alert")
-
-    def check_dict_for_true(self, d):
-        if isinstance(d, dict):
-            return any(self.check_dict_for_true(v) for v in d.values())
-        return bool(d)
-
     def main(self):
         while True:
+            print(f"-------------- CHECKS START --------------")
             try:
+                self.check_telegram_alerts()
                 self.get_data_from_journaldb()
                 self.get_data_from_journaldb_spruce()
                 self.check_for_glitches()
@@ -1171,7 +1155,6 @@ class AlertGenerator:
                 self.check_hp_on_during_onpeak()
                 self.check_rebooting()
                 # self.check_no_more_oil()
-                self.check_alert_status()
             except Exception as e:
                 print(f"Error in alert loop: {e}")
             time.sleep(self.main_loop_seconds)

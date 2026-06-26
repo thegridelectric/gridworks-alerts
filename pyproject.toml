@@ -9,6 +9,8 @@ authors = [
 ]
 requires-python = ">=3.12,<3.13"
 dependencies = [
+    "google-auth>=2.0.0",
+    "gspread>=6.0.0",
     "pendulum>=3.0.0",
     "psycopg2-binary>=2.9.9",
     "pydantic>=2.0",
@@ -20,6 +22,7 @@ dependencies = [
 
 [project.scripts]
 gwalert = "gwalert.alert_generator:main"
+gwalert-sheet = "gwalert.read_sheet:main"
 
 [project.urls]
 Homepage = "https://github.com/thegridelectric/gridworks-alerts"

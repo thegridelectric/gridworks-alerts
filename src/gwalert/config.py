@@ -13,9 +13,9 @@ class Settings(BaseSettings):
     gbo_db_url: SecretStr = SecretStr(
         "postgresql+psycopg2://journaldb:journaldb@localhost:5433/backofficedb_dev"
     )
-    ops_genie_api_key: SecretStr = SecretStr("")
-    email_sender: SecretStr = SecretStr("")
-    email_password: SecretStr = SecretStr("")
+    telegram_bot_token: SecretStr = SecretStr("")
+    google_sheets_credentials_path: str = ""
+    google_sheets_spreadsheet_id: str = ""
 
     model_config = SettingsConfigDict(
         env_prefix="GWALERT_",
