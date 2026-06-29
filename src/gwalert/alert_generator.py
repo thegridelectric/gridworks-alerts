@@ -76,7 +76,7 @@ class AlertGenerator:
         url = f"{self.settings.alert_manager_url.rstrip('/')}/new-alert"
         payload = {
             "message": message,
-            "house_alias": house_alias,
+            "site_alias": house_alias,
             "alert_alias": alert_alias,
         }
         try:
@@ -1022,12 +1022,12 @@ class AlertGenerator:
 
     def main(self):
         while True:
-            print(f"-------------- CHECKS START --------------")
+            print(f"\n-------------- CHECKS START {self.reference_now().format('YYYY-MM-DD HH:mm:ss')} --------------")
             try:
                 self.get_data_from_journaldb()
                 self.get_data_from_journaldb_spruce()
-                self.check_for_glitches()
                 self.check_no_data()
+                self.check_for_glitches()
                 self.check_zone_below_setpoint()
                 self.check_zone_freezing()
                 self.check_dist_pump()
