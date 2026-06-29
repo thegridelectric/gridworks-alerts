@@ -13,8 +13,7 @@ class Settings(BaseSettings):
     gbo_db_url: SecretStr = SecretStr(
         "postgresql+psycopg2://journaldb:journaldb@localhost:5433/backofficedb_dev"
     )
-    telegram_bot_token: SecretStr = SecretStr("")
-    google_sheets_spreadsheet_id: str = ""
+    alert_manager_url: str = "http://localhost:8000"
 
     model_config = SettingsConfigDict(
         env_prefix="GWALERT_",

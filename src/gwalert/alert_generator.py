@@ -1,17 +1,14 @@
-import json
 import time
 from typing import NamedTuple
 
 import dotenv
 import pendulum
 import requests
-from pydantic import BaseModel
 from sqlalchemy import asc, or_
 
 from gwalert.config import DEFAULT_ENV_FILE, Settings
 from gwalert.db import configure, get_db
 from gwalert.models import MessageSql
-from gwalert.google_sheet_reader import read_google_sheet, schedule_json_path
 from gwalert.types import Glitch, LayoutLite, Report, SnapshotSpaceheat
 
 SIMULATING = False
@@ -42,19 +39,6 @@ class ParsedSnapshotSpaceheat(NamedTuple):
     snapshot: SnapshotSpaceheat
 
 
-class AlertSend(BaseModel):
-    recipients: list[str]
-    sent_at: int
-
-
-class Alert(BaseModel):
-    count: int = 1
-    sends: list[AlertSend] = []
-    message: str
-    house_alias: str
-    alert_alias: str
-
-
 class AlertGenerator:
     def __init__(self):
         self.settings = Settings(_env_file=dotenv.find_dotenv(DEFAULT_ENV_FILE))
@@ -77,125 +61,35 @@ class AlertGenerator:
         self.houses_in_standby = []
         self.reports: list[ParsedReport] = []
         self.layout_lites: list[ParsedLayoutLite] = []
+        self.spruce_snapshots: list[ParsedSnapshotSpaceheat] = []
         self.selected_house_aliases: list[str] = []
         self.data = {}
         self.relays = {}
-        self.spruce_snapshots: list[ParsedSnapshotSpaceheat] = []
         self.alert_status = {}
-        self.active_telegram_alerts: dict[str, Alert] = {}
-        self.telegram_update_offset = 0
-        self.max_alert_count = 6
         self.main()
 
     def send_alert(self, message, house_alias, alert_alias):
-        read_google_sheet()
+        """Hand the alert off to the alert-manager service."""
         print(f"[ALERT] {message}")
-        full_alias = f"{pendulum.now(tz=self.timezone_str).format('YYYY-MM-DD')}-{house_alias}-{alert_alias}"
-
-        if full_alias not in self.active_telegram_alerts:
-            self.active_telegram_alerts[full_alias] = Alert(
-                message=message,
-                house_alias=house_alias,
-                alert_alias=alert_alias,
-            )
-        elif self.active_telegram_alerts[full_alias].count < self.max_alert_count:
-            self.active_telegram_alerts[full_alias].count += 1
-        else:
+        if SIMULATING:
             return
-
-        count = self.active_telegram_alerts[full_alias].count
-        recipients = self.get_alert_recipients(alert_count=count)
-        if not recipients:
-            print(f"Skipping telegram alert {full_alias}: no recipients resolved")
+        url = f"{self.settings.alert_manager_url.rstrip('/')}/new-alert"
+        payload = {
+            "message": message,
+            "house_alias": house_alias,
+            "alert_alias": alert_alias,
+        }
+        try:
+            response = requests.post(url, json=payload, timeout=10)
+        except requests.RequestException as e:
+            print(f"Could not reach alert-manager at {url}: {e}")
             return
-
-        url = f"https://api.telegram.org/bot{self.settings.telegram_bot_token.get_secret_value()}/sendMessage"
-        sent_to: list[str] = []
-        for chat_id in recipients:
-            response = requests.post(url, json={"chat_id": chat_id, "text": message})
-            if response.status_code == 200:
-                sent_to.append(chat_id)
-            else:
-                print(
-                    f"Failed to send telegram alert to {chat_id}: "
-                    f"{response.status_code}, {response.text}"
-                )
-
-        if sent_to:
-            self.active_telegram_alerts[full_alias].sends.append(
-                AlertSend(recipients=sent_to, sent_at=int(time.time()))
+        if response.status_code != 200:
+            print(
+                f"Failed to post alert to alert-manager: "
+                f"{response.status_code}, {response.text}"
             )
-            print(f"Telegram alert {full_alias} sent to {len(sent_to)} recipient(s)")
 
-    def get_alert_recipients(self, alert_count: int) -> list[str]:
-        alert_time = pendulum.now(tz=self.timezone_str)
-
-        schedule_path = schedule_json_path()
-        with schedule_path.open(encoding="utf-8") as schedule_file:
-            oncall_data = json.load(schedule_file)
-        schedule = oncall_data.get("schedule", {})
-        contacts = oncall_data.get("contacts", {})
-
-        if alert_count > 3:
-            recipients = [str(chat_id) for chat_id in contacts.values() if chat_id]
-            print(f"Escalation: sending to all {len(recipients)} contact(s)")
-            return recipients
-
-        names = schedule.get(str(alert_time.weekday()), {}).get(str(alert_time.hour), [])
-
-        if not names:
-            return []
-
-        recipients: list[str] = []
-        for name in names:
-            chat_id = contacts.get(name, "")
-            if chat_id:
-                recipients.append(str(chat_id))
-            else:
-                print(f"No Telegram chat ID configured for {name}")
-
-        print(f"On-call: {', '.join(names)} -> {len(recipients)} recipient(s)")
-        return recipients
-
-    def check_telegram_alerts(self):
-        print(f"\nChecking active alerts...")
-        print(f"There are {len(self.active_telegram_alerts)} active alerts.")
-        if not self.active_telegram_alerts:
-            return            
-
-        url = f"https://api.telegram.org/bot{self.settings.telegram_bot_token.get_secret_value()}/getUpdates"
-        response = requests.get(url, params={"offset": self.telegram_update_offset, "timeout": 0})
-        replies_by_chat: dict[str, list[int]] = {}
-        if response.status_code == 200:
-            for update in response.json().get("result", []):
-                self.telegram_update_offset = update["update_id"] + 1
-                msg = update.get("message") or update.get("edited_message")
-                if not msg or msg.get("from", {}).get("is_bot"):
-                    continue
-                chat_id = str(msg["chat"]["id"])
-                replies_by_chat.setdefault(chat_id, []).append(msg["date"])
-
-        for full_alert_alias, alert in list(self.active_telegram_alerts.items()):
-            acknowledged = False
-            for sent in alert.sends:
-                for recipient in sent.recipients:
-                    reply_times = replies_by_chat.get(str(recipient), [])
-                    if any(t >= sent.sent_at for t in reply_times):
-                        acknowledged = True
-                        break
-                if acknowledged:
-                    break
-
-            if acknowledged:
-                print(f"Telegram alert {full_alert_alias} acknowledged")
-                self.active_telegram_alerts.pop(full_alert_alias)
-            else:
-                self.send_alert(
-                    alert.message,
-                    alert.house_alias,
-                    alert.alert_alias,
-                )
-        
     def unix_ms_to_date(self, time_ms):
         return pendulum.from_timestamp(time_ms/1000, tz=self.timezone_str).replace(microsecond=0)
 
@@ -1130,7 +1024,6 @@ class AlertGenerator:
         while True:
             print(f"-------------- CHECKS START --------------")
             try:
-                self.check_telegram_alerts()
                 self.get_data_from_journaldb()
                 self.get_data_from_journaldb_spruce()
                 self.check_for_glitches()
