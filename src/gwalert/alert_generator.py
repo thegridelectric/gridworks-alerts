@@ -391,7 +391,7 @@ class AlertGenerator:
                         not in self.alert_status[house_alias][alert_alias]
                     ):
                         self.send_alert(
-                            f"{house_alias} - critical glitch: {summary}",
+                            f"Critical glitch: {summary}",
                             house_alias,
                             alert_alias,
                         )
@@ -416,13 +416,13 @@ class AlertGenerator:
 
             if not self.data[house_alias]:
                 if not self.alert_status[house_alias][alert_alias]:
-                    alert_message = f"{house_alias}: No data found in the last {self.hours_back} hour(s)"
+                    alert_message = f"No data found in the last {self.hours_back} hour(s)"
                     self.send_alert(alert_message, house_alias, alert_alias)
                     self.alert_status[house_alias][alert_alias] = True
 
             elif self.reference_epoch() - most_recent_ms/1000 > self.max_time_no_data:
                 if not self.alert_status[house_alias][alert_alias]:
-                    alert_message = f"{house_alias}: No data coming in since {round((self.reference_epoch()-most_recent_ms/1000)/60,1)} minutes"
+                    alert_message = f"No data coming in since {round((self.reference_epoch()-most_recent_ms/1000)/60,1)} minutes"
                     self.send_alert(alert_message, house_alias, alert_alias)
                     self.alert_status[house_alias][alert_alias] = True
 
@@ -442,13 +442,13 @@ class AlertGenerator:
 
         if not self.spruce_snapshots:
             if not self.alert_status['spruce'][alert_alias]:
-                alert_message = f"{'spruce'}: No data found in the last 10 minutes"
+                alert_message = "No data found in the last 10 minutes"
                 self.send_alert(alert_message, 'spruce', alert_alias)
                 self.alert_status['spruce'][alert_alias] = True
             
         elif self.reference_epoch() - most_recent_ms/1000 > self.max_time_no_data:
             if not self.alert_status['spruce'][alert_alias]:
-                alert_message = f"{'spruce'}: No data coming in since {round((self.reference_epoch()-most_recent_ms/1000)/60,1)} minutes"
+                alert_message = f"No data coming in since {round((self.reference_epoch()-most_recent_ms/1000)/60,1)} minutes"
                 self.send_alert(alert_message, 'spruce', alert_alias)
                 self.alert_status['spruce'][alert_alias] = True
 
@@ -528,7 +528,7 @@ class AlertGenerator:
                     setpoint_channel: str = [x for x in channels_by_zone[zone] if "set" in x][0]
                     if len(set(self.data[house_alias][setpoint_channel]["values"])) == 1:
                         if not self.alert_status[house_alias][alert_alias][zone]:
-                            alert_message = f"{house_alias}: {setpoint_channel.replace('-set','')} is significantly below setpoint"
+                            alert_message = f"{setpoint_channel.replace('-set','')} is significantly below setpoint"
                             self.send_alert(alert_message, house_alias, alert_alias+f"_{zone}")
                             self.alert_status[house_alias][alert_alias][zone] = True
                     else:
@@ -537,7 +537,7 @@ class AlertGenerator:
                             print(f"-- {zone} is significantly below setpoint but the setpoint was increased recently")
                         else:
                             if not self.alert_status[house_alias][alert_alias][zone]:
-                                alert_message = f"{house_alias}: {setpoint_channel.replace('-set','')} is significantly below setpoint"
+                                alert_message = f"{setpoint_channel.replace('-set','')} is significantly below setpoint"
                                 self.send_alert(alert_message, house_alias, alert_alias+f"_{zone}")
                                 self.alert_status[house_alias][alert_alias][zone] = True
     
@@ -583,7 +583,7 @@ class AlertGenerator:
                     self.alert_status[house_alias][alert_alias][zone] = False
                 else:                    
                     if not self.alert_status[house_alias][alert_alias][zone]:
-                        alert_message = f"{house_alias}: {zone} is below 40F"
+                        alert_message = f"{zone} is below 40F"
                         self.send_alert(alert_message, house_alias, alert_alias+f"_{zone}")
                         self.alert_status[house_alias][alert_alias][zone] = True
 
@@ -695,7 +695,7 @@ class AlertGenerator:
                 continue
 
             if self.alert_status[house_alias][alert_alias] == 3:
-                alert_message = f"{house_alias}: No distribution pump flow recorded since the last heat call"
+                alert_message = "No distribution pump flow recorded since the last heat call"
                 if found_power_after_heatcall:
                     alert_message += ", but found pump power"
                 else:
@@ -772,7 +772,7 @@ class AlertGenerator:
                         continue
 
                     if not self.alert_status[house_alias][alert_alias]:
-                        alert_message = f"{house_alias}: No store pump flow since relay 9 was closed"
+                        alert_message = "No store pump flow since relay 9 was closed"
                         if found_power_after_closed:
                             alert_message += ", but found pump power"
                         else:
@@ -883,7 +883,7 @@ class AlertGenerator:
                 self.alert_status[house_alias][alert_alias] = False
                 print(f"-- The HP is on")
             elif not self.alert_status[house_alias][alert_alias]:
-                alert_message = f"{house_alias}: The HP is not coming on"
+                alert_message = "The HP is not coming on"
                 self.send_alert(alert_message, house_alias, alert_alias)
                 self.alert_status[house_alias][alert_alias] = True
         
@@ -915,7 +915,7 @@ class AlertGenerator:
                 self.alert_status[house_alias][alert_alias] = False
 
             elif current_relay5_boss == 'auto.lc.n.relay5' and not self.alert_status[house_alias][alert_alias]:
-                self.send_alert(f"{house_alias}: Not in Atn!", house_alias, alert_alias)
+                self.send_alert("Not in Atn!", house_alias, alert_alias)
                 self.alert_status[house_alias][alert_alias] = True
 
     def check_hp_on_during_onpeak(self):
@@ -946,7 +946,7 @@ class AlertGenerator:
                     if (time_dt.hour == 7 or time_dt.hour == 16) and time_dt.minute < 2:
                         continue
                     if not self.alert_status[house_alias][alert_alias]:
-                        alert_message = f"{house_alias}: HP was seen on at {time_dt}, which is during onpeak"
+                        alert_message = f"HP was seen on at {time_dt}, which is during onpeak"
                         self.send_alert(alert_message, house_alias, alert_alias+f"_{time_dt.hour}")
                         self.alert_status[house_alias][alert_alias] = True
                         sent_alert = True
@@ -982,7 +982,7 @@ class AlertGenerator:
                     if count > 5:
                         reboot_detected = True
                         print(f"- {house_alias}: Rebooting detected")
-                        alert_message = f"{house_alias}: Rebooting detected"
+                        alert_message = "Rebooting detected"
                         if not self.alert_status[house_alias][alert_alias]:
                             self.send_alert(alert_message, house_alias, alert_alias)
                             self.alert_status[house_alias][alert_alias] = True
@@ -1013,7 +1013,7 @@ class AlertGenerator:
             for time_ms in on_times_oil_boiler:
                 
                     if not self.alert_status[house_alias][alert_alias]:
-                        alert_message = f"{house_alias}: Oil boiler is on but is not heating the buffer"
+                        alert_message = "Oil boiler is on but is not heating the buffer"
                         self.send_alert(alert_message, house_alias, alert_alias)
                         self.alert_status[house_alias][alert_alias] = True
                         sent_alert = True
