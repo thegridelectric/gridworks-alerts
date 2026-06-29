@@ -79,8 +79,10 @@ class AlertGenerator:
             "site_alias": house_alias,
             "alert_alias": alert_alias,
         }
+        token = self.settings.alert_manager_token.get_secret_value()
+        headers = {"Authorization": f"Bearer {token}"}
         try:
-            response = requests.post(url, json=payload, timeout=10)
+            response = requests.post(url, json=payload, headers=headers, timeout=10)
         except requests.RequestException as e:
             print(f"Could not reach alert-manager at {url}: {e}")
             return

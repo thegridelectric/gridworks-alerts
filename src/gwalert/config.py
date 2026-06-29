@@ -14,6 +14,7 @@ class Settings(BaseSettings):
         "postgresql+psycopg2://journaldb:journaldb@localhost:5433/backofficedb_dev"
     )
     alert_manager_url: str = "http://localhost:8000"
+    alert_manager_token: SecretStr = SecretStr("")
 
     model_config = SettingsConfigDict(
         env_prefix="GWALERT_",
