@@ -68,16 +68,17 @@ class AlertGenerator:
         self.alert_status = {}
         self.main()
 
-    def send_alert(self, message, house_alias, alert_alias):
+    def send_alert(self, message, house_alias, alert_alias, time_sent=None):
         """Hand the alert off to the alert-manager service."""
         print(f"[ALERT] {message}")
-        if SIMULATING:
-            return
+        if time_sent is None:
+            time_sent = int(self.reference_epoch())
         url = f"{self.settings.alert_manager_url.rstrip('/')}/new-alert"
         payload = {
             "message": message,
             "site_alias": house_alias,
             "alert_alias": alert_alias,
+            "time_sent": time_sent,
         }
         token = self.settings.alert_manager_token.get_secret_value()
         headers = {"Authorization": f"Bearer {token}"}
@@ -394,6 +395,7 @@ class AlertGenerator:
                             f"Critical glitch: {summary}",
                             house_alias,
                             alert_alias,
+                            time_sent=time_received,
                         )
                         self.alert_status[house_alias][alert_alias][
                             unique_id

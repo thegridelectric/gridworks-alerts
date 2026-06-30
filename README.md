@@ -18,7 +18,8 @@ Create `/home/ubuntu/gridworks-alerts/.env` from `.env.example`. All variables u
 |----------|---------|
 | `GWALERT_DB_URL` | SQLAlchemy URL for the journaldb database |
 | `GWALERT_GBO_DB_URL` | SQLAlchemy URL for the backoffice database |
-| `GWALERT_OPS_GENIE_API_KEY` | API key for OpsGenie notifications |
+| `GWALERT_ALERT_MANAGER_URL` | Base URL of the alert-manager service (e.g. `http://localhost:8000`) |
+| `GWALERT_ALERT_MANAGER_TOKEN` | Bearer token for `POST /new-alert` |
 
 ## EC2 setup
 
