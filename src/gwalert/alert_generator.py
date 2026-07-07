@@ -1,4 +1,5 @@
 import time
+import json
 from typing import NamedTuple
 
 import dotenv
@@ -71,6 +72,7 @@ class AlertGenerator:
     def send_alert(self, message, house_alias, alert_alias, time_sent=None):
         """Hand the alert off to the alert-manager service."""
         print(f"[ALERT] {message}")
+        self.send_opsgenie_alert(message, house_alias, alert_alias)
         if time_sent is None:
             time_sent = int(self.reference_epoch())
         url = f"{self.settings.alert_manager_url.rstrip('/')}/new-alert"
@@ -92,6 +94,27 @@ class AlertGenerator:
                 f"Failed to post alert to alert-manager: "
                 f"{response.status_code}, {response.text}"
             )
+
+    def send_opsgenie_alert(self, message: str, house_alias: str, alert_alias: str):
+        print(f"- [ALERT] {message}")
+        url = "https://api.opsgenie.com/v2/alerts"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"GenieKey {self.settings.opsgenie_api_key.get_secret_value()}",
+        }
+        responders = [{"type": "team", "id": self.settings.opsgenie_team_id.get_secret_value()}]
+        alias = f"{pendulum.now(tz=self.timezone_str).format('YYYY-MM-DD')}-{house_alias}-{alert_alias}"
+        payload = {
+            "message": f"[{house_alias.capitalize()}] {message}",
+            "alias": alias,
+            "priority": "P1",
+            "responders": responders,
+        }
+        response = requests.post(url, headers=headers, data=json.dumps(payload))
+        if response.status_code == 202:
+            print("Alert sent successfully")
+        else:
+            print(f"Failed to send alert. Status code: {response.status_code}, Response: {response.text}")
 
     def unix_ms_to_date(self, time_ms):
         return pendulum.from_timestamp(time_ms/1000, tz=self.timezone_str).replace(microsecond=0)

@@ -15,6 +15,8 @@ class Settings(BaseSettings):
     )
     alert_manager_url: str = "http://localhost:8000"
     alert_manager_token: SecretStr = SecretStr("")
+    opsgenie_api_key: SecretStr = SecretStr("")
+    opsgenie_team_id: SecretStr = SecretStr("")
 
     model_config = SettingsConfigDict(
         env_prefix="GWALERT_",
