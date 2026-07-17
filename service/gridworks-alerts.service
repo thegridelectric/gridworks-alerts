@@ -1,0 +1,21 @@
+[Unit]
+Description=GridWorks residential heating alerts
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ubuntu
+WorkingDirectory=/home/ubuntu/gridworks-alerts
+Environment=PYTHONUNBUFFERED=1
+ExecStart=/home/ubuntu/gridworks-alerts/.venv/bin/gwalert
+Restart=on-failure
+RestartSec=30
+# Hard memory ceiling: a runaway gwalert gets killed by its own cgroup
+# instead of starving the whole box (see OPS-451, 2026-07-16 — an unbounded
+# growth cycle OOM-wedged journaldb). Raise deliberately if gwalert's real
+# working set grows past this.
+MemoryMax=512M
+
+[Install]
+WantedBy=multi-user.target
