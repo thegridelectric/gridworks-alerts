@@ -50,6 +50,7 @@ class AlertGenerator:
         self.max_time_no_data = 10*60 #TODO nyquist
         self.main_loop_seconds = 5*60
         self.hours_back = 2
+        self.query_batch_size = 20
         self.max_setpoint_violation_f = 2
         self.min_dist_pump_w = 2
         self.min_store_pump_w = 5
@@ -269,7 +270,7 @@ class AlertGenerator:
                 )
 
                 found_any = False
-                for message in query.yield_per(500):
+                for message in query.yield_per(self.query_batch_size):
                     found_any = True
                     if message.message_type_name == "layout.lite":
                         parsed_layout = self._parse_layout_lite_message(message)
@@ -361,7 +362,7 @@ class AlertGenerator:
                     ).order_by(asc(MessageSql.message_persisted_ms))
                 )
                 total = skipped = 0
-                for m in snapshot_query.yield_per(500):
+                for m in snapshot_query.yield_per(self.query_batch_size):
                     total += 1
                     parsed = self._parse_snapshot_spaceheat_message(m)
                     if parsed is None:
@@ -409,7 +410,7 @@ class AlertGenerator:
                     )
                 glitch_total = glitch_skipped = 0
                 parsed_glitches = []
-                for m in glitch_query.yield_per(500):
+                for m in glitch_query.yield_per(self.query_batch_size):
                     glitch_total += 1
                     parsed = self._parse_glitch_message(m)
                     if parsed is None:
