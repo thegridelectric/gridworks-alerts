@@ -1,5 +1,6 @@
-import time
+import gc
 import json
+import time
 from typing import NamedTuple
 
 import dotenv
@@ -196,14 +197,67 @@ class AlertGenerator:
             snapshot=snapshot,
         )
 
+    def _apply_layout_lite(self, parsed: ParsedLayoutLite) -> None:
+        """Fold a single layout.lite into the standby / critical-zone bookkeeping."""
+        self.critical_zones_by_house[parsed.house_alias] = {
+            "known": True,
+            "list": parsed.layout.critical_zone_list,
+        }
+        if (
+            parsed.layout.system_mode == "Standby"
+            and parsed.house_alias not in self.houses_in_standby
+        ):
+            self.houses_in_standby.append(parsed.house_alias)
+            print(f"Adding {parsed.house_alias} to the list of houses in standby")
+        elif (
+            parsed.layout.system_mode != "Standby"
+            and parsed.house_alias in self.houses_in_standby
+        ):
+            self.houses_in_standby.remove(parsed.house_alias)
+            print(f"Removing {parsed.house_alias} from the list of houses in standby")
+
+    def _ingest_report(self, parsed: ParsedReport) -> None:
+        """Fold a single report straight into self.data / self.relays."""
+        house_data = self.data.setdefault(parsed.house_alias, {})
+        house_relays = self.relays.setdefault(parsed.house_alias, {})
+        for channel in parsed.report.channel_reading_list:
+            entry = house_data.get(channel.channel_name)
+            if entry is None:
+                entry = {"times": [], "values": []}
+                house_data[channel.channel_name] = entry
+            entry["times"].extend(channel.scada_read_time_unix_ms_list)
+            entry["values"].extend(channel.value_list)
+        for state in parsed.report.state_list:
+            if 'relay' not in state.machine_handle:
+                continue
+            relay_name = state.machine_handle.split('.')[-1]
+            relay_group = house_relays.setdefault(relay_name, {})
+            boss = relay_group.get(state.machine_handle)
+            if boss is None:
+                boss = {"times": [], "values": []}
+                relay_group[state.machine_handle] = boss
+            boss["times"].extend(state.unix_ms_list)
+            boss["values"].extend(state.state_list)
+
     def get_data_from_journaldb(self):
         print("\nFinding data from journaldb...")
         time_now = self.reference_now()
+
+        self.reports = []
+        self.layout_lites = []
+        self.data = {}
+        self.relays = {}
+        self.selected_house_aliases = []
+
+        houses_seen: set[str] = set()
+        report_count = report_skipped = 0
+        layout_count = layout_skipped = 0
+
         try:
             with next(get_db()) as session:
                 start_ms = time_now.add(hours=-self.hours_back).timestamp() * 1000
                 end_ms = time_now.timestamp() * 1000
-                sql_messages = (
+                query = (
                     session.query(MessageSql).filter(
                         or_(
                             MessageSql.message_type_name == "report",
@@ -211,101 +265,66 @@ class AlertGenerator:
                         ),
                         MessageSql.message_persisted_ms >= start_ms,
                         MessageSql.message_persisted_ms <= end_ms,
-                        ).order_by(asc(MessageSql.message_persisted_ms)).all()
-                    )
-                if not sql_messages:
+                    ).order_by(asc(MessageSql.message_persisted_ms))
+                )
+
+                found_any = False
+                for message in query.yield_per(500):
+                    found_any = True
+                    if message.message_type_name == "layout.lite":
+                        parsed_layout = self._parse_layout_lite_message(message)
+                        if parsed_layout is None:
+                            layout_skipped += 1
+                            continue
+                        layout_count += 1
+                        self.layout_lites.append(parsed_layout)
+                        self._apply_layout_lite(parsed_layout)
+                    elif message.message_type_name == "report":
+                        parsed_report = self._parse_report_message(message)
+                        if parsed_report is None:
+                            report_skipped += 1
+                            continue
+                        report_count += 1
+                        houses_seen.add(parsed_report.house_alias)
+                        # Ignored houses are excluded from selected_house_aliases so we skip building their data.
+                        if parsed_report.house_alias not in self.ignored_house_aliases:
+                            self._ingest_report(parsed_report)
+
+                if not found_any:
                     raise Exception("No messages found.")
         except Exception as e:
             print(f"An error occured while getting data from journaldb: {e}")
+            self.data = {}
+            self.relays = {}
+            self.selected_house_aliases = []
             return
-        
-        report_messages = [
-            m for m in sql_messages if m.message_type_name == "report"
-        ]
-        self.reports = [
-            parsed
-            for m in report_messages
-            if (parsed := self._parse_report_message(m)) is not None
-        ]
-        layout_lite_messages = [
-            m for m in sql_messages if m.message_type_name == "layout.lite"
-        ]
-        self.layout_lites = [
-            parsed
-            for m in layout_lite_messages
-            if (parsed := self._parse_layout_lite_message(m)) is not None
-        ]
+
         print(
-            f"Found {len(self.reports)} reports "
-            f"({len(report_messages) - len(self.reports)} skipped) and "
-            f"{len(self.layout_lites)} layout lites "
-            f"({len(layout_lite_messages) - len(self.layout_lites)} skipped)"
+            f"Found {report_count} reports ({report_skipped} skipped) and "
+            f"{layout_count} layout lites ({layout_skipped} skipped)"
         )
-        for parsed in self.layout_lites:
-            self.critical_zones_by_house[parsed.house_alias] = {
-                "known": True,
-                "list": parsed.layout.critical_zone_list,
-            }
-            if (
-                parsed.layout.system_mode == "Standby"
-                and parsed.house_alias not in self.houses_in_standby
-            ):
-                self.houses_in_standby.append(parsed.house_alias)
-                print(f"Adding {parsed.house_alias} to the list of houses in standby")
-            elif (
-                parsed.layout.system_mode != "Standby"
-                and parsed.house_alias in self.houses_in_standby
-            ):
-                self.houses_in_standby.remove(parsed.house_alias)
-                print(f"Removing {parsed.house_alias} from the list of houses in standby")
-        all_house_aliases = list({x.house_alias for x in self.reports})
-        self.selected_house_aliases = [x for x in all_house_aliases if x not in self.ignored_house_aliases]
+
+        all_house_aliases = sorted(houses_seen)
+        self.selected_house_aliases = [
+            x for x in all_house_aliases if x not in self.ignored_house_aliases
+        ]
         print(f"Selected house aliases: {self.selected_house_aliases}")
 
         for house_alias in all_house_aliases:
-            self.data[house_alias] = {}
-            self.relays[house_alias] = {}
+            self.data.setdefault(house_alias, {})
+            self.relays.setdefault(house_alias, {})
             if house_alias not in self.alert_status:
                 self.alert_status[house_alias] = {}
             if house_alias not in self.critical_zones_by_house:
                 self.critical_zones_by_house[house_alias] = {'known': False, 'list': []}
-
             if house_alias not in self.selected_house_aliases:
                 print(f"- {house_alias}: House is not in the selected aliases")
-                continue
 
-            for parsed in [r for r in self.reports if r.house_alias == house_alias]:
-                for channel in parsed.report.channel_reading_list:
-                    channel_name = channel.channel_name
-                    if channel_name not in self.data[house_alias]:
-                        self.data[house_alias][channel_name] = {}
-                        self.data[house_alias][channel_name]['times'] = []
-                        self.data[house_alias][channel_name]['values'] = []
-                    self.data[house_alias][channel_name]["times"].extend(
-                        channel.scada_read_time_unix_ms_list
-                    )
-                    self.data[house_alias][channel_name]["values"].extend(
-                        channel.value_list
-                    )
-
-                for state in parsed.report.state_list:
-                    if 'relay' in state.machine_handle:
-                        relay_name = state.machine_handle.split('.')[-1]
-                        if relay_name not in self.relays[house_alias]:
-                            self.relays[house_alias][relay_name] = {}
-                        if state.machine_handle not in self.relays[house_alias][relay_name]:
-                            self.relays[house_alias][relay_name][state.machine_handle] = {}
-                            self.relays[house_alias][relay_name][state.machine_handle]["times"] = []
-                            self.relays[house_alias][relay_name][state.machine_handle]["values"] = []
-                        self.relays[house_alias][relay_name][state.machine_handle]["times"].extend(
-                            state.unix_ms_list
-                        )
-                        self.relays[house_alias][relay_name][state.machine_handle]["values"].extend(
-                            state.state_list
-                        )
-
+        for house_alias in self.selected_house_aliases:
             for channel in self.data[house_alias]:
                 sorted_times_values = sorted(zip(self.data[house_alias][channel]["times"], self.data[house_alias][channel]["values"]))
+                if not sorted_times_values:
+                    continue
                 sorted_times, sorted_values = zip(*sorted_times_values)
                 self.data[house_alias][channel]["times"] = list(sorted_times)
                 self.data[house_alias][channel]["values"] = list(sorted_values)
@@ -314,6 +333,8 @@ class AlertGenerator:
                 for relay_boss in self.relays[house_alias][relay]:
                     sorted_times_values = sorted(zip(self.relays[house_alias][relay][relay_boss]["times"], 
                                                      self.relays[house_alias][relay][relay_boss]["values"]))
+                    if not sorted_times_values:
+                        continue
                     sorted_times, sorted_values = zip(*sorted_times_values)
                     self.relays[house_alias][relay][relay_boss]["times"] = list(sorted_times)
                     self.relays[house_alias][relay][relay_boss]["values"] = list(sorted_values)
@@ -331,23 +352,25 @@ class AlertGenerator:
             with next(get_db()) as session:
                 start_ms = time_now.add(minutes=-10).timestamp() * 1000
                 end_ms = time_now.timestamp() * 1000
-                snapshot_messages = (
+                snapshot_query = (
                     session.query(MessageSql).filter(
                         MessageSql.message_type_name == "snapshot.spaceheat",
                         MessageSql.from_alias == f"hw1.isone.me.versant.keene.spruce.scada",
                         MessageSql.message_persisted_ms >= start_ms,
                         MessageSql.message_persisted_ms <= end_ms,
-                    ).order_by(asc(MessageSql.message_persisted_ms)).all()
+                    ).order_by(asc(MessageSql.message_persisted_ms))
                 )
-                self.spruce_snapshots = [
-                    parsed
-                    for m in snapshot_messages
-                    if (parsed := self._parse_snapshot_spaceheat_message(m))
-                    is not None
-                ]
+                total = skipped = 0
+                for m in snapshot_query.yield_per(500):
+                    total += 1
+                    parsed = self._parse_snapshot_spaceheat_message(m)
+                    if parsed is None:
+                        skipped += 1
+                        continue
+                    self.spruce_snapshots.append(parsed)
                 print(
                     f"Found {len(self.spruce_snapshots)} snapshots "
-                    f"({len(snapshot_messages) - len(self.spruce_snapshots)} skipped)"
+                    f"({skipped} skipped)"
                 )
         except Exception as e:
             print(f"An error occured while getting data from journaldb: {e}")
@@ -377,18 +400,22 @@ class AlertGenerator:
                 ])
             with next(get_db()) as session:
                 start_ms = self.reference_now().add(hours=-self.hours_back).timestamp() * 1000
-                glitch_messages = (
+                glitch_query = (
                     session.query(MessageSql).filter(
                         MessageSql.message_type_name == "glitch",
                         MessageSql.from_alias.in_(message_aliases),
                         MessageSql.message_persisted_ms >= start_ms,
-                        ).order_by(asc(MessageSql.message_persisted_ms)).all()
+                        ).order_by(asc(MessageSql.message_persisted_ms))
                     )
-                parsed_glitches = [
-                    parsed
-                    for m in glitch_messages
-                    if (parsed := self._parse_glitch_message(m)) is not None
-                ]
+                glitch_total = glitch_skipped = 0
+                parsed_glitches = []
+                for m in glitch_query.yield_per(500):
+                    glitch_total += 1
+                    parsed = self._parse_glitch_message(m)
+                    if parsed is None:
+                        glitch_skipped += 1
+                        continue
+                    parsed_glitches.append(parsed)
                 if not parsed_glitches:
                     print("No glitches found")
                 else:
@@ -399,7 +426,7 @@ class AlertGenerator:
                     )
                     print(
                         f"Found {len(parsed_glitches)} glitches "
-                        f"({len(glitch_messages) - len(parsed_glitches)} skipped), "
+                        f"({glitch_skipped} skipped), "
                         f"of which {critical_count} are critical"
                     )
                 for parsed in parsed_glitches:
@@ -1047,6 +1074,15 @@ class AlertGenerator:
                 print(f"- {house_alias}: Oil boiler is doing fine")
                 self.alert_status[house_alias][alert_alias] = False
 
+    def _rss_mb(self) -> float | None:
+        """Current resident set size in MB (Linux only), or None if unavailable."""
+        try:
+            with open("/proc/self/statm") as f:
+                pages = int(f.read().split()[1])
+            return pages * 4096 / (1024 * 1024)
+        except (OSError, ValueError, IndexError):
+            return None
+
     def main(self):
         while True:
             print(f"\n-------------- CHECKS START {self.reference_now().format('YYYY-MM-DD HH:mm:ss')} --------------")
@@ -1060,12 +1096,23 @@ class AlertGenerator:
                 self.check_dist_pump()
                 self.check_store_pump()
                 self.check_hp()
-                # self.check_in_atn()
                 self.check_hp_on_during_onpeak()
                 self.check_rebooting()
+                # self.check_in_atn()
                 # self.check_no_more_oil()
             except Exception as e:
                 print(f"Error in alert loop: {e}")
+
+            self.reports = []
+            self.layout_lites = []
+            self.data = {}
+            self.relays = {}
+            self.spruce_snapshots = []
+            gc.collect()
+            rss = self._rss_mb()
+            if rss is not None:
+                print(f"[mem] RSS after iteration: {rss:.0f} MB")
+            
             time.sleep(self.main_loop_seconds)
 
 
