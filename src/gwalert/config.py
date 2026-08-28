@@ -10,9 +10,6 @@ class Settings(BaseSettings):
     db_url: SecretStr = SecretStr(
         "postgresql+psycopg2://journaldb:journaldb@localhost:5433/journaldb_dev"
     )
-    gbo_db_url: SecretStr = SecretStr(
-        "postgresql+psycopg2://journaldb:journaldb@localhost:5433/backofficedb_dev"
-    )
     alert_manager_url: str = "http://localhost:8000"
     alert_manager_token: SecretStr = SecretStr("")
     opsgenie_api_key: SecretStr = SecretStr("")
