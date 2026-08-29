@@ -140,7 +140,6 @@ class AlertGenerator:
 
     def send_opsgenie_alert(self, message: str, house_alias: str, alert_alias: str):
         print(f"- [ALERT] {message}")
-        return
         url = "https://api.opsgenie.com/v2/alerts"
         headers = {
             "Content-Type": "application/json",
