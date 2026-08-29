@@ -10,12 +10,10 @@ class Settings(BaseSettings):
     db_url: SecretStr = SecretStr(
         "postgresql+psycopg2://journaldb:journaldb@localhost:5433/journaldb_dev"
     )
-    gbo_db_url: SecretStr = SecretStr(
-        "postgresql+psycopg2://journaldb:journaldb@localhost:5433/backofficedb_dev"
-    )
-    ops_genie_api_key: SecretStr = SecretStr("")
-    email_sender: SecretStr = SecretStr("")
-    email_password: SecretStr = SecretStr("")
+    alert_manager_url: str = "http://localhost:8000"
+    alert_manager_token: SecretStr = SecretStr("")
+    opsgenie_api_key: SecretStr = SecretStr("")
+    opsgenie_team_id: SecretStr = SecretStr("")
 
     model_config = SettingsConfigDict(
         env_prefix="GWALERT_",

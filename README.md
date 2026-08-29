@@ -17,8 +17,8 @@ Create `/home/ubuntu/gridworks-alerts/.env` from `.env.example`. All variables u
 | Variable | Purpose |
 |----------|---------|
 | `GWALERT_DB_URL` | SQLAlchemy URL for the journaldb database |
-| `GWALERT_GBO_DB_URL` | SQLAlchemy URL for the backoffice database |
-| `GWALERT_OPS_GENIE_API_KEY` | API key for OpsGenie notifications |
+| `GWALERT_ALERT_MANAGER_URL` | Base URL of the alert-manager service (e.g. `http://localhost:8000`) |
+| `GWALERT_ALERT_MANAGER_TOKEN` | Bearer token for `POST /new-alert` |
 
 ## EC2 setup
 
@@ -33,25 +33,14 @@ cp .env.example .env
 # edit .env with production credentials
 ```
 
-Create `/etc/systemd/system/gridworks-alerts.service`:
+Install the systemd unit from the repo (canonical copy in
+[`service/gridworks-alerts.service`](service/gridworks-alerts.service) — it
+includes a `MemoryMax=512M` ceiling so a runaway process can only kill the
+service, never the box; see OPS-451 for the 2026-07-16 incident that taught
+this):
 
-```ini
-[Unit]
-Description=GridWorks residential heating alerts
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-User=ubuntu
-WorkingDirectory=/home/ubuntu/gridworks-alerts
-Environment=PYTHONUNBUFFERED=1
-ExecStart=/home/ubuntu/gridworks-alerts/.venv/bin/gwalert
-Restart=on-failure
-RestartSec=30
-
-[Install]
-WantedBy=multi-user.target
+```bash
+sudo cp service/gridworks-alerts.service /etc/systemd/system/gridworks-alerts.service
 ```
 
 Enable and start the service:
