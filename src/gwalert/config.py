@@ -8,7 +8,7 @@ DEFAULT_ENV_FILE = ".env"
 
 class Settings(BaseSettings):
     db_url: SecretStr = SecretStr(
-        "postgresql+psycopg2://journaldb:journaldb@localhost:5433/journaldb_dev"
+        "postgresql+psycopg2://gw_journalkeeper:PASSWORD@a3wo8r2r92.g7fnifvthm.tsdb.cloud.timescale.com:31401/tsdb?sslmode=require"
     )
     alert_manager_url: str = "http://localhost:8000"
     alert_manager_token: SecretStr = SecretStr("")

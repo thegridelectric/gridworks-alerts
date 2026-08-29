@@ -16,7 +16,7 @@ Create `/home/ubuntu/gridworks-alerts/.env` from `.env.example`. All variables u
 
 | Variable | Purpose |
 |----------|---------|
-| `GWALERT_DB_URL` | SQLAlchemy URL for the journaldb database |
+| `GWALERT_DB_URL` | SQLAlchemy URL for the JournalKeeper journal database (`tsdb`, schema `gridworks`); use the `gw_journalkeeper` role for now |
 | `GWALERT_ALERT_MANAGER_URL` | Base URL of the alert-manager service (e.g. `http://localhost:8000`) |
 | `GWALERT_ALERT_MANAGER_TOKEN` | Bearer token for `POST /new-alert` |
 

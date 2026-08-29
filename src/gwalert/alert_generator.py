@@ -1,17 +1,58 @@
 import gc
 import json
+import re
 import time
 from typing import NamedTuple
 
 import dotenv
 import pendulum
 import requests
-from sqlalchemy import asc, or_
+from sqlalchemy import and_, asc, or_
 
 from gwalert.config import DEFAULT_ENV_FILE, Settings
 from gwalert.db import configure, get_db
-from gwalert.models import MessageSql
+from gwalert.enum_decode import (
+    decode_enum_value,
+    decode_relay_state_value,
+    energization_for_contacts_closed,
+    map_top_state_for_relay5,
+)
+from gwalert.models import MessageSql, ReadingChannelSql, ReadingSql
 from gwalert.types import Glitch, LayoutLite, Report, SnapshotSpaceheat
+
+HOUSE_PREFIX = "hw1.isone.me.versant.keene"
+FORECAST_CHANNEL_NAMES = frozenset({"forecast-ws", "forecast-oat"})
+ALERT_SCALAR_CHANNELS = frozenset({
+    "dist-pump-pwr",
+    "dist-flow",
+    "store-pump-pwr",
+    "store-flow",
+    "hp-idu-pwr",
+    "hp-odu-pwr",
+})
+RELAY_BOSS_STATE_CHANNELS = frozenset({"top-state"})
+RELAY_NUM_SUFFIX = re.compile(r"relay(\d+)$", re.IGNORECASE)
+
+
+def _alert_reading_channel_filter():
+    """Limit readings to channels the alert checks actually use."""
+    return and_(
+        or_(
+            ReadingChannelSql.name.in_(
+                ALERT_SCALAR_CHANNELS | RELAY_BOSS_STATE_CHANNELS
+            ),
+            ReadingChannelSql.name.like("%zone%"),
+            and_(
+                ReadingChannelSql.unit == "Enum",
+                ReadingChannelSql.name.like("%relay%"),
+            ),
+            and_(
+                ReadingChannelSql.unit == "RelayState",
+                ReadingChannelSql.name.like("%relay%"),
+            ),
+        ),
+        ReadingChannelSql.name.notin_(list(FORECAST_CHANNEL_NAMES)),
+    )
 
 SIMULATING = False
 SIMULATING_REFERENCE_TIME = pendulum.parse('2026-06-10T00:21:00-04:00')
@@ -50,7 +91,7 @@ class AlertGenerator:
         self.max_time_no_data = 10*60 #TODO nyquist
         self.main_loop_seconds = 5*60
         self.hours_back = 2
-        self.query_batch_size = 20
+        self.query_batch_size = 2000
         self.max_setpoint_violation_f = 2
         self.min_dist_pump_w = 2
         self.min_store_pump_w = 5
@@ -99,6 +140,7 @@ class AlertGenerator:
 
     def send_opsgenie_alert(self, message: str, house_alias: str, alert_alias: str):
         print(f"- [ALERT] {message}")
+        return
         url = "https://api.opsgenie.com/v2/alerts"
         headers = {
             "Content-Type": "application/json",
@@ -133,6 +175,15 @@ class AlertGenerator:
             return float(self.simulated_reference_time.timestamp())
         return time.time()
 
+    def _message_timestamp_ms(self, message: MessageSql) -> int:
+        return int(message.timestamp.timestamp() * 1000)
+
+    def _house_alias_from_terminal_asset(self, terminal_asset_alias: str) -> str | None:
+        parts = terminal_asset_alias.split(".")
+        if len(parts) < 2 or parts[-1] != "ta":
+            return None
+        return parts[-2]
+
     def _parse_layout_lite_message(
         self, message: MessageSql
     ) -> ParsedLayoutLite | None:
@@ -145,7 +196,7 @@ class AlertGenerator:
             return None
         return ParsedLayoutLite(
             house_alias=message.from_alias.split(".")[-2],
-            message_persisted_ms=message.message_persisted_ms,
+            message_persisted_ms=self._message_timestamp_ms(message),
             layout=layout,
         )
 
@@ -179,7 +230,7 @@ class AlertGenerator:
             return None
         return ParsedGlitch(
             house_alias=house_alias,
-            message_persisted_ms=message.message_persisted_ms,
+            message_persisted_ms=self._message_timestamp_ms(message),
             glitch=glitch,
         )
 
@@ -194,7 +245,7 @@ class AlertGenerator:
             )
             return None
         return ParsedSnapshotSpaceheat(
-            message_persisted_ms=message.message_persisted_ms,
+            message_persisted_ms=self._message_timestamp_ms(message),
             snapshot=snapshot,
         )
 
@@ -240,9 +291,78 @@ class AlertGenerator:
             boss["times"].extend(state.unix_ms_list)
             boss["values"].extend(state.state_list)
 
+    def _ingest_reading_row(
+        self,
+        *,
+        timestamp_ms: int,
+        value: int,
+        channel_name: str,
+        unit: str,
+        unit_type: str,
+        house_alias: str,
+        end_ms: int,
+    ) -> None:
+        if unit == "RelayState":
+            relay_match = RELAY_NUM_SUFFIX.search(channel_name)
+            if relay_match is None:
+                return
+            relay_name = f"relay{relay_match.group(1)}"
+            state_str = decode_relay_state_value(value)
+            relay_group = self.relays.setdefault(house_alias, {}).setdefault(
+                relay_name, {}
+            )
+            boss = relay_group.setdefault(
+                channel_name, {"times": [], "values": []}
+            )
+            boss["times"].append(timestamp_ms)
+            boss["values"].append(state_str)
+            return
+
+        if channel_name == "top-state" and unit == "Enum":
+            state_str = map_top_state_for_relay5(
+                decode_enum_value(unit_type, value)
+            )
+            relay_group = self.relays.setdefault(house_alias, {}).setdefault(
+                "relay5", {}
+            )
+            boss = relay_group.setdefault(
+                channel_name, {"times": [], "values": []}
+            )
+            boss["times"].append(timestamp_ms)
+            boss["values"].append(state_str)
+            return
+
+        if unit == "Enum" and "relay" in channel_name:
+            relay_name = channel_name.split(".")[-1]
+            if not relay_name.startswith("relay"):
+                return
+            state_str = decode_enum_value(unit_type, value)
+            relay_group = self.relays.setdefault(house_alias, {}).setdefault(
+                relay_name, {}
+            )
+            boss = relay_group.setdefault(
+                channel_name, {"times": [], "values": []}
+            )
+            boss["times"].append(timestamp_ms)
+            boss["values"].append(state_str)
+            return
+
+        if channel_name in FORECAST_CHANNEL_NAMES or timestamp_ms > end_ms:
+            return
+
+        entry = self.data.setdefault(house_alias, {}).setdefault(
+            channel_name, {"times": [], "values": []}
+        )
+        entry["times"].append(timestamp_ms)
+        entry["values"].append(value)
+
     def get_data_from_journaldb(self):
         print("\nFinding data from journaldb...")
+        fetch_started = time.perf_counter()
         time_now = self.reference_now()
+        start = time_now.add(hours=-self.hours_back)
+        end = time_now
+        end_ms = int(end.timestamp() * 1000)
 
         self.reports = []
         self.layout_lites = []
@@ -251,48 +371,84 @@ class AlertGenerator:
         self.selected_house_aliases = []
 
         houses_seen: set[str] = set()
-        report_count = report_skipped = 0
         layout_count = layout_skipped = 0
+        reading_count = 0
 
         try:
             with next(get_db()) as session:
-                start_ms = time_now.add(hours=-self.hours_back).timestamp() * 1000
-                end_ms = time_now.timestamp() * 1000
-                query = (
-                    session.query(MessageSql).filter(
-                        or_(
-                            MessageSql.message_type_name == "report",
-                            MessageSql.message_type_name == "layout.lite",
-                        ),
-                        MessageSql.message_persisted_ms >= start_ms,
-                        MessageSql.message_persisted_ms <= end_ms,
-                    ).order_by(asc(MessageSql.message_persisted_ms))
+                layout_query = (
+                    session.query(MessageSql)
+                    .filter(
+                        MessageSql.message_type_name == "layout.lite",
+                        MessageSql.timestamp >= start,
+                        MessageSql.timestamp <= end,
+                    )
+                    .order_by(asc(MessageSql.timestamp))
                 )
 
-                found_any = False
-                for message in query.yield_per(self.query_batch_size):
-                    found_any = True
-                    if message.message_type_name == "layout.lite":
-                        parsed_layout = self._parse_layout_lite_message(message)
-                        if parsed_layout is None:
-                            layout_skipped += 1
-                            continue
-                        layout_count += 1
-                        self.layout_lites.append(parsed_layout)
-                        self._apply_layout_lite(parsed_layout)
-                    elif message.message_type_name == "report":
-                        parsed_report = self._parse_report_message(message)
-                        if parsed_report is None:
-                            report_skipped += 1
-                            continue
-                        report_count += 1
-                        houses_seen.add(parsed_report.house_alias)
-                        # Ignored houses are excluded from selected_house_aliases so we skip building their data.
-                        if parsed_report.house_alias not in self.ignored_house_aliases:
-                            self._ingest_report(parsed_report)
+                found_layout = False
+                for message in layout_query.yield_per(self.query_batch_size):
+                    found_layout = True
+                    parsed_layout = self._parse_layout_lite_message(message)
+                    if parsed_layout is None:
+                        layout_skipped += 1
+                        continue
+                    layout_count += 1
+                    houses_seen.add(parsed_layout.house_alias)
+                    self.layout_lites.append(parsed_layout)
+                    self._apply_layout_lite(parsed_layout)
 
-                if not found_any:
-                    raise Exception("No messages found.")
+                readings_query = (
+                    session.query(
+                        ReadingSql.timestamp,
+                        ReadingSql.value,
+                        ReadingChannelSql.name,
+                        ReadingChannelSql.unit,
+                        ReadingChannelSql.unit_type,
+                        ReadingChannelSql.terminal_asset_alias,
+                    )
+                    .join(
+                        ReadingChannelSql,
+                        ReadingSql.channel_id == ReadingChannelSql.id,
+                    )
+                    .filter(
+                        ReadingSql.timestamp >= start,
+                        ReadingSql.timestamp <= end,
+                        ReadingChannelSql.terminal_asset_alias.like(
+                            f"{HOUSE_PREFIX}.%.ta"
+                        ),
+                        ReadingChannelSql.deactivated_date.is_(None),
+                        _alert_reading_channel_filter(),
+                    )
+                    .order_by(asc(ReadingSql.timestamp))
+                    .execution_options(stream_results=True)
+                )
+
+                found_readings = False
+                for row in readings_query.yield_per(self.query_batch_size):
+                    found_readings = True
+                    reading_count += 1
+                    timestamp, value, name, unit, unit_type, terminal_asset = row
+                    house_alias = self._house_alias_from_terminal_asset(
+                        terminal_asset
+                    )
+                    if house_alias is None:
+                        continue
+                    houses_seen.add(house_alias)
+                    if house_alias in self.ignored_house_aliases:
+                        continue
+                    self._ingest_reading_row(
+                        timestamp_ms=int(timestamp.timestamp() * 1000),
+                        value=value,
+                        channel_name=name,
+                        unit=unit,
+                        unit_type=unit_type,
+                        house_alias=house_alias,
+                        end_ms=end_ms,
+                    )
+
+                if not found_layout and not found_readings:
+                    raise Exception("No layout.lite messages or readings found.")
         except Exception as e:
             print(f"An error occured while getting data from journaldb: {e}")
             self.data = {}
@@ -301,8 +457,9 @@ class AlertGenerator:
             return
 
         print(
-            f"Found {report_count} reports ({report_skipped} skipped) and "
-            f"{layout_count} layout lites ({layout_skipped} skipped)"
+            f"Found {reading_count} readings and "
+            f"{layout_count} layout lites ({layout_skipped} skipped) "
+            f"in {time.perf_counter() - fetch_started:.1f}s"
         )
 
         all_house_aliases = sorted(houses_seen)
@@ -322,24 +479,6 @@ class AlertGenerator:
                 print(f"- {house_alias}: House is not in the selected aliases")
 
         for house_alias in self.selected_house_aliases:
-            for channel in self.data[house_alias]:
-                sorted_times_values = sorted(zip(self.data[house_alias][channel]["times"], self.data[house_alias][channel]["values"]))
-                if not sorted_times_values:
-                    continue
-                sorted_times, sorted_values = zip(*sorted_times_values)
-                self.data[house_alias][channel]["times"] = list(sorted_times)
-                self.data[house_alias][channel]["values"] = list(sorted_values)
-
-            for relay in self.relays[house_alias]:
-                for relay_boss in self.relays[house_alias][relay]:
-                    sorted_times_values = sorted(zip(self.relays[house_alias][relay][relay_boss]["times"], 
-                                                     self.relays[house_alias][relay][relay_boss]["values"]))
-                    if not sorted_times_values:
-                        continue
-                    sorted_times, sorted_values = zip(*sorted_times_values)
-                    self.relays[house_alias][relay][relay_boss]["times"] = list(sorted_times)
-                    self.relays[house_alias][relay][relay_boss]["values"] = list(sorted_values)
-
             if self.data[house_alias]:
                 print(f"- {house_alias}: Found data")
             else:
@@ -348,18 +487,20 @@ class AlertGenerator:
     def get_data_from_journaldb_spruce(self):
         print("\nFinding Spruce data from journaldb...")
         time_now = self.reference_now()
+        start = time_now.add(minutes=-10)
+        end = time_now
         self.spruce_snapshots = []
         try:
             with next(get_db()) as session:
-                start_ms = time_now.add(minutes=-10).timestamp() * 1000
-                end_ms = time_now.timestamp() * 1000
                 snapshot_query = (
-                    session.query(MessageSql).filter(
+                    session.query(MessageSql)
+                    .filter(
                         MessageSql.message_type_name == "snapshot.spaceheat",
-                        MessageSql.from_alias == f"hw1.isone.me.versant.keene.spruce.scada",
-                        MessageSql.message_persisted_ms >= start_ms,
-                        MessageSql.message_persisted_ms <= end_ms,
-                    ).order_by(asc(MessageSql.message_persisted_ms))
+                        MessageSql.from_alias == "hw1.isone.me.versant.keene.spruce.scada",
+                        MessageSql.timestamp >= start,
+                        MessageSql.timestamp <= end,
+                    )
+                    .order_by(asc(MessageSql.timestamp))
                 )
                 total = skipped = 0
                 for m in snapshot_query.yield_per(self.query_batch_size):
@@ -400,14 +541,16 @@ class AlertGenerator:
                     f"hw1.isone.me.versant.keene.{house_alias}.scada.s2",
                 ])
             with next(get_db()) as session:
-                start_ms = self.reference_now().add(hours=-self.hours_back).timestamp() * 1000
+                start = self.reference_now().add(hours=-self.hours_back)
                 glitch_query = (
-                    session.query(MessageSql).filter(
+                    session.query(MessageSql)
+                    .filter(
                         MessageSql.message_type_name == "glitch",
                         MessageSql.from_alias.in_(message_aliases),
-                        MessageSql.message_persisted_ms >= start_ms,
-                        ).order_by(asc(MessageSql.message_persisted_ms))
+                        MessageSql.timestamp >= start,
                     )
+                    .order_by(asc(MessageSql.timestamp))
+                )
                 glitch_total = glitch_skipped = 0
                 parsed_glitches = []
                 for m in glitch_query.yield_per(self.query_batch_size):
@@ -463,9 +606,18 @@ class AlertGenerator:
                 self.alert_status[house_alias][alert_alias] = False
 
             most_recent_ms = 0
+            now_ms = int(self.reference_epoch() * 1000)
             for channel in self.data[house_alias]:
-                if self.data[house_alias][channel]['times'][-1] > most_recent_ms:
-                    most_recent_ms = self.data[house_alias][channel]['times'][-1]
+                if channel in FORECAST_CHANNEL_NAMES:
+                    continue
+                times = self.data[house_alias][channel]["times"]
+                if not times:
+                    continue
+                channel_most_recent = times[-1]
+                if channel_most_recent > now_ms:
+                    continue
+                if channel_most_recent > most_recent_ms:
+                    most_recent_ms = channel_most_recent
 
             if not self.data[house_alias]:
                 if not self.alert_status[house_alias][alert_alias]:
@@ -790,51 +942,51 @@ class AlertGenerator:
                 print(f"{house_alias}: Missing data!") # TODO: create an alert?
                 continue
 
-            if relay9_state == "RelayClosed":
+            if relay9_state == "Energized":
                 if self.reference_epoch() - time_since_in_current_state/1000 > 10*60:
-                    print(f"- {house_alias}: Relay 9 is closed since more than 10 minutes, expecting store flow")
+                    print(f"- {house_alias}: Relay 9 is energized since more than 10 minutes, expecting store flow")
 
                     # Try to find power
                     pwr = self.data[house_alias]['store-pump-pwr']
-                    power_since_closed = [
-                        power for time, power in zip(pwr['times'], pwr['values']) 
+                    power_since_pulled = [
+                        power for time, power in zip(pwr['times'], pwr['values'])
                         if time >= time_since_in_current_state
                     ]
-                    found_power_after_closed = False
-                    if not power_since_closed and pwr['values'][-1] <= self.min_store_pump_w:
-                        print(f"- {house_alias}: No pump power recorded after relay 9 was closed")
-                    elif max(power_since_closed) <= self.min_store_pump_w:
-                        print(f"- {house_alias}: No significant pump power after relay 9 was closed")
+                    found_power_after_pulled = False
+                    if not power_since_pulled and pwr['values'][-1] <= self.min_store_pump_w:
+                        print(f"- {house_alias}: No pump power recorded after relay 9 was energized")
+                    elif max(power_since_pulled) <= self.min_store_pump_w:
+                        print(f"- {house_alias}: No significant pump power after relay 9 was energized")
                     else:
-                        print(f"- {house_alias}: Found store pump power after relay 9 was closed")
-                        found_power_after_closed = True
+                        print(f"- {house_alias}: Found store pump power after relay 9 was energized")
+                        found_power_after_pulled = True
 
                     # Try to find flow
                     flow = self.data[house_alias]['store-flow']
-                    flow_since_closed = [
-                        flow/100 for time, flow in zip(flow['times'], flow['values']) 
+                    flow_since_pulled = [
+                        flow/100 for time, flow in zip(flow['times'], flow['values'])
                         if time >= time_since_in_current_state
                     ]
-                    if not flow_since_closed and flow['values'][-1] <= self.min_store_pump_gpm:
-                        print(f"- {house_alias}: No pump flow recorded after relay 9 was closed")
-                    elif max(flow_since_closed) <= self.min_store_pump_gpm:
-                        print(f"- {house_alias}: No significant pump flow after relay 9 was closed")
+                    if not flow_since_pulled and flow['values'][-1] <= self.min_store_pump_gpm:
+                        print(f"- {house_alias}: No pump flow recorded after relay 9 was energized")
+                    elif max(flow_since_pulled) <= self.min_store_pump_gpm:
+                        print(f"- {house_alias}: No significant pump flow after relay 9 was energized")
                     else:
-                        print(f"- {house_alias}: Found store pump flow after relay 9 was closed")
+                        print(f"- {house_alias}: Found store pump flow after relay 9 was energized")
                         self.alert_status[house_alias][alert_alias] = False
                         continue
 
                     if not self.alert_status[house_alias][alert_alias]:
-                        alert_message = "No store pump flow since relay 9 was closed"
-                        if found_power_after_closed:
+                        alert_message = "No store pump flow since relay 9 was energized"
+                        if found_power_after_pulled:
                             alert_message += ", but found pump power"
                         else:
                             alert_message += ", and no pump power found"
                         self.send_alert(alert_message, house_alias, alert_alias)
                         self.alert_status[house_alias][alert_alias] = True
-            
-            elif relay9_state == "RelayOpen":
-                print(f"- {house_alias}: Relay 9 is open, not expecting any store flow at the moment")
+
+            elif relay9_state == "DeEnergized":
+                print(f"- {house_alias}: Relay 9 is de-energized, not expecting any store flow at the moment")
                 self.alert_status[house_alias][alert_alias] = False
 
     def check_hp(self):
@@ -905,10 +1057,11 @@ class AlertGenerator:
                 pairs[0][0],
             )
             relay6_state = r['values'][-1]
+            relay6_contacts_closed = energization_for_contacts_closed()
 
-            if relay6_state == "RelayClosed":
+            if relay6_state == relay6_contacts_closed:
                 if self.reference_epoch() - time_since_in_current_state/1000 > 15*60:
-                    print(f"-- Relay 6 is Closed since more than 15 minutes")
+                    print(f"-- Relay 6 contacts closed since more than 15 minutes")
                 else:
                     self.alert_status[house_alias][alert_alias] = False
                     print(f"-- The HP should not be on")
