@@ -11,7 +11,7 @@ class Settings(BaseSettings):
     # the read-only role, and an alert-manager on loopback with its own
     # dev-default token. Production values come from .env.
     db_url: SecretStr = SecretStr(
-        "postgresql+psycopg2://gw_reader:gw_reader@localhost:5433/tsdb"
+        "postgresql+psycopg2://gw_alerts:gw_alerts@localhost:5433/tsdb"
     )
     alert_manager_url: str = "http://127.0.0.1:8000"
     alert_manager_token: SecretStr = SecretStr("dev-alert-token")

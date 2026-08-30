@@ -12,7 +12,7 @@ See [docs/alerts.md](docs/alerts.md) for alert definitions, triggers, and thresh
 
 ## Configuration
 
-Copy `.env.example` to `.env` (mode `600`). All variables use the `GWALERT_` prefix. The defaults are a working dev pair — a local `gridworks-data` container read as `gw_reader`, and an alert-manager on loopback with its dev token — so production values go in `.env`:
+Copy `.env.example` to `.env` (mode `600`). All variables use the `GWALERT_` prefix. The defaults are a working dev pair — a local `gridworks-data` container read as `gw_alerts`, and an alert-manager on loopback with its dev token — so production values go in `.env`:
 
 | Variable | Default | Purpose |
 |----------|---------|---------|
