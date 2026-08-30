@@ -5,10 +5,10 @@ Wants=network-online.target
 
 [Service]
 Type=simple
-User=ubuntu
-WorkingDirectory=/home/ubuntu/gridworks-alerts
+User=alerts
+WorkingDirectory=/home/alerts/gridworks-alerts
 Environment=PYTHONUNBUFFERED=1
-ExecStart=/home/ubuntu/gridworks-alerts/.venv/bin/gwalert
+ExecStart=/home/alerts/gridworks-alerts/.venv/bin/gwalert
 Restart=on-failure
 RestartSec=30
 # Hard memory ceiling: a runaway gwalert gets killed by its own cgroup

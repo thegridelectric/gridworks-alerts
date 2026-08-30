@@ -8,64 +8,41 @@ See [docs/alerts.md](docs/alerts.md) for alert definitions, triggers, and thresh
 
 - Python 3.12
 - [uv](https://docs.astral.sh/uv/)
-- Ubuntu EC2 with systemd
+- Linux with systemd, for the service unit
 
 ## Configuration
 
-Create `/home/ubuntu/gridworks-alerts/.env` from `.env.example`. All variables use the `GWALERT_` prefix:
+Copy `.env.example` to `.env` (mode `600`). All variables use the `GWALERT_` prefix. The defaults are a working dev pair — a local `gridworks-data` container read as `gw_reader`, and an alert-manager on loopback with its dev token — so production values go in `.env`:
 
-| Variable | Purpose |
-|----------|---------|
-| `GWALERT_DB_URL` | SQLAlchemy URL for the JournalKeeper journal database (`tsdb`, schema `gridworks`); use the `gw_journalkeeper` role for now |
-| `GWALERT_ALERT_MANAGER_URL` | Base URL of the alert-manager service (e.g. `http://localhost:8000`) |
-| `GWALERT_ALERT_MANAGER_TOKEN` | Bearer token for `POST /new-alert` |
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `GWALERT_DB_URL` | local dev container | SQLAlchemy URL for the JournalKeeper journal database (`tsdb`, schema `gridworks`), as a read-only role |
+| `GWALERT_ALERT_MANAGER_URL` | `http://127.0.0.1:8000` | Base URL of the alert-manager service |
+| `GWALERT_ALERT_MANAGER_TOKEN` | `dev-alert-token` | Bearer token for `POST /new-alert` |
+| `GWALERT_SYNTHETIC_ALERT` | `false` | `true` sends one start-up alert to the alert-manager (never Opsgenie) to prove the delivery path without the database |
+| `GWALERT_OPSGENIE_API_KEY` / `GWALERT_OPSGENIE_TEAM_ID` | empty | Opsgenie, the parallel fallback channel |
 
-## EC2 setup
-
-Install the application:
+## Run
 
 ```bash
-cd /home/ubuntu
-git clone git@github.com:thegridelectric/gridworks-alerts.git
-cd gridworks-alerts
 uv sync
-cp .env.example .env
-# edit .env with production credentials
+uv run gwalert
 ```
 
-Install the systemd unit from the repo (canonical copy in
-[`service/gridworks-alerts.service`](service/gridworks-alerts.service) — it
-includes a `MemoryMax=512M` ceiling so a runaway process can only kill the
-service, never the box; see OPS-451 for the 2026-07-16 incident that taught
-this):
+## Service
+
+[`service/gridworks-alerts.service`](service/gridworks-alerts.service) runs
+`gwalert` from a checkout at `/home/alerts/gridworks-alerts` as the `alerts`
+user, with a `MemoryMax=512M` ceiling so a runaway process can only kill the
+service, never the host. Installing it needs root:
 
 ```bash
-sudo cp service/gridworks-alerts.service /etc/systemd/system/gridworks-alerts.service
+cp service/gridworks-alerts.service /etc/systemd/system/
+systemctl daemon-reload
+systemctl enable --now gridworks-alerts
 ```
 
-Enable and start the service:
-
-```bash
-sudo systemctl daemon-reload
-sudo systemctl enable gridworks-alerts
-sudo systemctl start gridworks-alerts
-```
-
-Check status and logs:
-
-```bash
-sudo systemctl status gridworks-alerts
-sudo journalctl -u gridworks-alerts -f
-```
-
-## Deploy updates
-
-```bash
-cd /home/ubuntu/gridworks-alerts
-git pull
-uv sync
-sudo systemctl restart gridworks-alerts
-```
+Logs: `journalctl -u gridworks-alerts -f`. Update: `git pull && uv sync --frozen && sudo systemctl restart gridworks-alerts`.
 
 ## License
 
