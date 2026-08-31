@@ -113,9 +113,13 @@ class AlertGenerator:
         self.main()
 
     def send_alert(self, message, house_alias, alert_alias, time_sent=None):
-        """Hand the alert off to the alert-manager service."""
+        """Raise an alert on every channel: Opsgenie (fallback) and alert-manager."""
         print(f"[ALERT] {message}")
         self.send_opsgenie_alert(message, house_alias, alert_alias)
+        self.send_to_alert_manager(message, house_alias, alert_alias, time_sent)
+
+    def send_to_alert_manager(self, message, house_alias, alert_alias, time_sent=None):
+        """Hand the alert off to the alert-manager service."""
         if time_sent is None:
             time_sent = int(self.reference_epoch())
         url = f"{self.settings.alert_manager_url.rstrip('/')}/new-alert"
@@ -1237,6 +1241,9 @@ class AlertGenerator:
             return None
 
     def main(self):
+        if self.settings.synthetic_alert:
+            # Proves gwalert -> alert-manager -> Telegram; never pages Opsgenie.
+            self.send_to_alert_manager("Synthetic alert: gwalert started", "synthetic", "synthetic")
         while True:
             print(f"\n-------------- CHECKS START {self.reference_now().format('YYYY-MM-DD HH:mm:ss')} --------------")
             try:
