@@ -103,6 +103,7 @@ class AlertGenerator:
         self.simulated_reference_time = SIMULATING_REFERENCE_TIME
         self.critical_zones_by_house = {}
         self.houses_in_standby = []
+        self.houses_with_monobloc = []
         self.reports: list[ParsedReport] = []
         self.layout_lites: list[ParsedLayoutLite] = []
         self.selected_house_aliases: list[str] = []
@@ -164,6 +165,9 @@ class AlertGenerator:
 
     def unix_ms_to_date(self, time_ms):
         return pendulum.from_timestamp(time_ms/1000, tz=self.timezone_str).replace(microsecond=0)
+
+    def to_fahrenheit(self, celsius):
+        return (celsius * 9/5) + 32
 
     def reference_now(self) -> pendulum.DateTime:
         """Datetime used anywhere we meant 'now' for alert windows (frozen when SIMULATING)."""
@@ -257,6 +261,12 @@ class AlertGenerator:
             "known": True,
             "list": parsed.layout.critical_zone_list,
         }
+        # TODO: Add HpModel to layout.lite, so we can check for monobloc here instead of hardcoding 'spruce'
+        if (
+            parsed.house_alias == 'spruce'
+            and parsed.house_alias not in self.houses_with_monobloc
+        ):
+            self.houses_with_monobloc.append(parsed.house_alias)
         if (
             parsed.layout.system_mode == "Standby"
             and parsed.house_alias not in self.houses_in_standby
@@ -645,12 +655,6 @@ class AlertGenerator:
                 channels_by_zone[channel_name_short].append(channel)
 
             for zone in channels_by_zone:
-
-                # Temporary fix while layout.lite messages are getting to journaldb
-                if 'garage' in zone and 'elm' in house_alias:
-                    print(f"-- {zone} is the garage zone in Elm, skipping")
-                    continue
-
                 if zone not in self.alert_status[house_alias][alert_alias]:
                     self.alert_status[house_alias][alert_alias][zone] = False
 
@@ -679,6 +683,15 @@ class AlertGenerator:
                         if values:
                             temperature = values[-1] / 1000
                             found_temperature = True
+                
+                # if not found_temperature:
+                #     for channel in channels_by_zone[zone]:
+                #         if 'gw-temp' in channel:
+                #             values = self.data[house_alias][channel]["values"]
+                #             if values:
+                #                 temperature = values[-1] / 1000
+                #                 found_temperature = True
+
                 if not found_setpoint:
                     print(f"-- {zone}: Missing setpoint channel or readings")
                     continue
@@ -740,6 +753,11 @@ class AlertGenerator:
                     if "temp" in channel and "gw" not in channel:
                         temperature = self.data[house_alias][channel]["values"][-1] / 1000
                         found_temperature = True
+                if not found_temperature:
+                    for channel in channels_by_zone[zone]:
+                        if 'gw-temp' in channel:
+                            temperature = self.to_fahrenheit(self.data[house_alias][channel]["values"][-1] / 100)
+                            found_temperature = True
                 if not found_temperature:
                     print(f"-- {zone}: Missing temperature channel")
                     continue
@@ -817,9 +835,8 @@ class AlertGenerator:
                 if zone_last_heatcall_time > last_heatcall_time:
                     last_heatcall_time = zone_last_heatcall_time
 
-            if (not [x for x in self.data[house_alias] if 'zone' in x and 'state' in x] 
-                or 'dist-pump-pwr' not in self.data[house_alias] or 'dist-flow' not in self.data[house_alias]):
-                print(f"{house_alias}: Missing data!") # TODO: create an alert?
+            if 'dist-pump-pwr' not in self.data[house_alias] or 'dist-flow' not in self.data[house_alias]:
+                print(f"{house_alias}: Missing data!")
                 continue
 
             if last_heatcall_time == 0:
@@ -966,9 +983,12 @@ class AlertGenerator:
             if alert_alias not in self.alert_status[house_alias]:
                 self.alert_status[house_alias][alert_alias] = False
 
-            # TODO: check if monoblock and adapt the code as a consequence
-            if 'hp-idu-pwr' not in self.data[house_alias] or 'hp-odu-pwr' not in self.data[house_alias]:
-                print(f"{house_alias}: Missing data!")
+            if 'hp-idu-pwr' not in self.data[house_alias] and house_alias not in self.houses_with_monobloc:
+                print(f"{house_alias}: Missing HP indoor unit data!")
+                continue
+           
+            if 'hp-odu-pwr' not in self.data[house_alias]:
+                print(f"{house_alias}: Missing HP outdoor unit data!")
                 continue
 
             if 'relay5' not in self.relays[house_alias]:
@@ -1035,8 +1055,14 @@ class AlertGenerator:
             print(f"-- The HP should be on")
 
             odu_channel = self.data[house_alias]['hp-odu-pwr']
-            idu_channel = self.data[house_alias]['hp-idu-pwr']
-            latest_reading_time_ms = max(max(odu_channel['times']), max(idu_channel['times']))
+            if house_alias in self.houses_with_monobloc:
+                idu_channel = {'times': [], 'values': []}
+            else:
+                idu_channel = self.data[house_alias]['hp-idu-pwr']
+            
+            latest_reading_time_ms = max(
+                odu_channel['times'] + idu_channel['times']
+            )
             if self.reference_epoch() - latest_reading_time_ms/1000 > 15*60:
                 print("There is no recent HP power data available")
                 continue
@@ -1096,14 +1122,23 @@ class AlertGenerator:
                 print(f"-- {house_alias} is in Standby, skipping")
                 continue
 
-            if "hp-odu-pwr" not in self.data[house_alias] or "hp-odu-pwr" not in self.data[house_alias]:
-                print(f"{house_alias}: Missing data!") # TODO: create an alert?
+            if 'hp-odu-pwr' not in self.data[house_alias]:
+                print(f"{house_alias}: Missing HP outdoor unit data!")
+                continue
+
+            if 'hp-idu-pwr' not in self.data[house_alias] and house_alias not in self.houses_with_monobloc:
+                print(f"{house_alias}: Missing HP indoor unit data!")
                 continue
 
             odu_channel = self.data[house_alias]['hp-odu-pwr']
             on_times_odu = [t for t, v in zip(odu_channel['times'], odu_channel['values']) if v/1000 >= self.min_hp_kw]
-            idu_channel = self.data[house_alias]['hp-idu-pwr']
+
+            if house_alias in self.houses_with_monobloc:
+                idu_channel = {'times': [], 'values': []}
+            else:
+                idu_channel = self.data[house_alias]['hp-idu-pwr']
             on_times_idu = [t for t, v in zip(idu_channel['times'], idu_channel['values']) if v/1000 >= self.min_hp_kw]
+
             on_times = sorted(on_times_odu + on_times_idu)
 
             sent_alert = False
