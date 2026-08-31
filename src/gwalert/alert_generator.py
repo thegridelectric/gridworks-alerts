@@ -7,7 +7,7 @@ from typing import NamedTuple
 import dotenv
 import pendulum
 import requests
-from sqlalchemy import and_, asc, or_
+from sqlalchemy import and_, asc, desc, or_
 
 from gwalert.config import DEFAULT_ENV_FILE, Settings
 from gwalert.db import configure, get_db
@@ -399,7 +399,6 @@ class AlertGenerator:
                     layout_count += 1
                     houses_seen.add(parsed_layout.house_alias)
                     self.layout_lites.append(parsed_layout)
-                    self._apply_layout_lite(parsed_layout)
 
                 readings_query = (
                     session.query(
@@ -451,7 +450,26 @@ class AlertGenerator:
                     )
 
                 if not found_layout and not found_readings:
-                    raise Exception("No layout.lite messages or readings found.")
+                    raise Exception(f"No layout.lite messages or readings found in the last {self.hours_back} hour(s).")
+
+                for house_alias in houses_seen:
+                    latest_layout_message = (
+                        session.query(MessageSql)
+                        .filter(
+                            MessageSql.message_type_name == "layout.lite",
+                            MessageSql.from_alias == f"{HOUSE_PREFIX}.{house_alias}.scada",
+                        )
+                        .order_by(desc(MessageSql.timestamp))
+                        .limit(1)
+                        .first()
+                    )
+                    if latest_layout_message is None:
+                        continue
+                    parsed_layout = self._parse_layout_lite_message(latest_layout_message)
+                    if parsed_layout is None:
+                        continue
+                    self._apply_layout_lite(parsed_layout)
+
         except Exception as e:
             print(f"An error occured while getting data from journaldb: {e}")
             self.data = {}
