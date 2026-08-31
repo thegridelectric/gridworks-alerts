@@ -1,24 +1,37 @@
-from sqlalchemy import BigInteger, Column, String, UniqueConstraint
-from sqlalchemy.dialects.postgresql import JSONB
-from sqlalchemy.orm import declarative_base
+from __future__ import annotations
 
-Base = declarative_base()
+import uuid
+from datetime import datetime
+
+from sqlalchemy import DateTime, Index, String, Uuid
+from sqlalchemy.dialects.postgresql import JSONB
+from sqlalchemy.orm import Mapped, mapped_column
+
+from gwalert.models._base import Base
 
 
 class MessageSql(Base):
     __tablename__ = "messages"
-    message_id = Column(String, primary_key=True)
-    from_alias = Column(String, nullable=False)
-    message_type_name = Column(String, nullable=False)
-    message_persisted_ms = Column(BigInteger, nullable=False)
-    payload = Column(JSONB, nullable=False)
-    message_created_ms = Column(BigInteger)
+    id: Mapped[uuid.UUID] = mapped_column(Uuid, primary_key=True)
+    timestamp: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, primary_key=True, index=True
+    )
+    from_alias: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    persisted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False
+    )
+    message_type_name: Mapped[str] = mapped_column(String, nullable=False)
+    payload: Mapped[dict] = mapped_column(JSONB, nullable=False)
 
     __table_args__ = (
-        UniqueConstraint(
+        Index("messages_timestamp_idx", timestamp.desc()),
+        Index(
+            "ix_from_type_message",
             "from_alias",
             "message_type_name",
-            "message_persisted_ms",
-            name="uq_from_type_message",
+            "persisted_at",
         ),
     )
