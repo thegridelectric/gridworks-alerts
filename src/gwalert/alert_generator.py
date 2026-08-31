@@ -87,7 +87,7 @@ class AlertGenerator:
         self.settings = Settings(_env_file=dotenv.find_dotenv(DEFAULT_ENV_FILE))
         configure(self.settings)
         self.timezone_str = 'America/New_York'
-        self.ignored_house_aliases = ['moss', 'orange', 'spruce'] # TODO: put this in the .env file
+        self.ignored_house_aliases = ['moss', 'orange'] # TODO: put this in the .env file
         self.max_time_no_data = 10*60 #TODO nyquist
         self.main_loop_seconds = 5*60
         self.hours_back = 2
@@ -105,7 +105,6 @@ class AlertGenerator:
         self.houses_in_standby = []
         self.reports: list[ParsedReport] = []
         self.layout_lites: list[ParsedLayoutLite] = []
-        self.spruce_snapshots: list[ParsedSnapshotSpaceheat] = []
         self.selected_house_aliases: list[str] = []
         self.data = {}
         self.relays = {}
@@ -452,6 +451,7 @@ class AlertGenerator:
                 if not found_layout and not found_readings:
                     raise Exception(f"No layout.lite messages or readings found in the last {self.hours_back} hour(s).")
 
+                print(f"\nFinding latest layout.lite messages for each house...")
                 for house_alias in houses_seen:
                     latest_layout_message = (
                         session.query(MessageSql)
@@ -478,7 +478,7 @@ class AlertGenerator:
             return
 
         print(
-            f"Found {reading_count} readings and "
+            f"\nFound {reading_count} readings and "
             f"{layout_count} layout lites ({layout_skipped} skipped) "
             f"in {time.perf_counter() - fetch_started:.1f}s"
         )
@@ -504,40 +504,6 @@ class AlertGenerator:
                 print(f"- {house_alias}: Found data")
             else:
                 print(f"- {house_alias}: Did not find any data")
-
-    def get_data_from_journaldb_spruce(self):
-        print("\nFinding Spruce data from journaldb...")
-        time_now = self.reference_now()
-        start = time_now.add(minutes=-10)
-        end = time_now
-        self.spruce_snapshots = []
-        try:
-            with next(get_db()) as session:
-                snapshot_query = (
-                    session.query(MessageSql)
-                    .filter(
-                        MessageSql.message_type_name == "snapshot.spaceheat",
-                        MessageSql.from_alias == "hw1.isone.me.versant.keene.spruce.scada",
-                        MessageSql.timestamp >= start,
-                        MessageSql.timestamp <= end,
-                    )
-                    .order_by(asc(MessageSql.timestamp))
-                )
-                total = skipped = 0
-                for m in snapshot_query.yield_per(self.query_batch_size):
-                    total += 1
-                    parsed = self._parse_snapshot_spaceheat_message(m)
-                    if parsed is None:
-                        skipped += 1
-                        continue
-                    self.spruce_snapshots.append(parsed)
-                print(
-                    f"Found {len(self.spruce_snapshots)} snapshots "
-                    f"({skipped} skipped)"
-                )
-        except Exception as e:
-            print(f"An error occured while getting data from journaldb: {e}")
-            return
 
     def check_for_glitches(self):
         alert_alias = "critical_glitch"
@@ -655,32 +621,6 @@ class AlertGenerator:
             else:
                 print(f"- {house_alias}: Found data up to {round((self.reference_epoch()-most_recent_ms/1000)/60,1)} minutes ago")
                 self.alert_status[house_alias][alert_alias] = False
-
-        print("\nChecking for Spruce data...")
-        if 'spruce' not in self.alert_status:
-            self.alert_status['spruce'] = {}
-        if alert_alias not in self.alert_status['spruce']:
-            self.alert_status['spruce'][alert_alias] = False
-
-        most_recent_ms = 0
-        if self.spruce_snapshots:
-            most_recent_ms = max([x.message_persisted_ms for x in self.spruce_snapshots])
-
-        if not self.spruce_snapshots:
-            if not self.alert_status['spruce'][alert_alias]:
-                alert_message = "No data found in the last 10 minutes"
-                self.send_alert(alert_message, 'spruce', alert_alias)
-                self.alert_status['spruce'][alert_alias] = True
-            
-        elif self.reference_epoch() - most_recent_ms/1000 > self.max_time_no_data:
-            if not self.alert_status['spruce'][alert_alias]:
-                alert_message = f"No data coming in since {round((self.reference_epoch()-most_recent_ms/1000)/60,1)} minutes"
-                self.send_alert(alert_message, 'spruce', alert_alias)
-                self.alert_status['spruce'][alert_alias] = True
-
-        else:
-            print(f"- {'spruce'}: Found data up to {round((self.reference_epoch()-most_recent_ms/1000)/60,1)} minutes ago")
-            self.alert_status['spruce'][alert_alias] = False
 
     def check_zone_below_setpoint(self):
         alert_alias = "zone_setpoint"
@@ -1266,7 +1206,6 @@ class AlertGenerator:
             print(f"\n-------------- CHECKS START {self.reference_now().format('YYYY-MM-DD HH:mm:ss')} --------------")
             try:
                 self.get_data_from_journaldb()
-                self.get_data_from_journaldb_spruce()
                 self.check_no_data()
                 self.check_for_glitches()
                 self.check_zone_below_setpoint()
@@ -1285,7 +1224,6 @@ class AlertGenerator:
             self.layout_lites = []
             self.data = {}
             self.relays = {}
-            self.spruce_snapshots = []
             gc.collect()
             rss = self._rss_mb()
             if rss is not None:
