@@ -1,0 +1,9 @@
+# gwalert convenience aliases — pure spelling over systemctl/journalctl,
+# no logic. Sourced from the box login's ~/.bashrc at box setup; the
+# sudoers drop-in (/etc/sudoers.d/alerts) grants exactly these
+# systemctl invocations.
+alias gwastart='sudo systemctl start gridworks-alerts'
+alias gwastop='sudo systemctl stop gridworks-alerts'
+alias gwarestart='sudo systemctl restart gridworks-alerts'
+alias gwastatus='systemctl status gridworks-alerts --no-pager'
+alias gwalog='journalctl -u gridworks-alerts -f'
