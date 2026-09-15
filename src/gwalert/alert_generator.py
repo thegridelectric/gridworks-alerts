@@ -19,6 +19,7 @@ from gwalert.enum_decode import (
 )
 from gwalert.models import MessageSql, ReadingChannelSql, ReadingSql
 from gwalert.types import Glitch, LayoutLite, Report, SnapshotSpaceheat
+from gwalert.units import temperature_f, zone_channel_role
 
 HOUSE_PREFIX = "hw1.isone.me.versant.keene"
 FORECAST_CHANNEL_NAMES = frozenset({"forecast-ws", "forecast-oat"})
@@ -169,8 +170,28 @@ class AlertGenerator:
     def unix_ms_to_date(self, time_ms):
         return pendulum.from_timestamp(time_ms/1000, tz=self.timezone_str).replace(microsecond=0)
 
-    def to_fahrenheit(self, celsius):
-        return (celsius * 9/5) + 32
+    def zone_temperature_f(
+        self, house_alias: str, channels: list[str], roles: tuple[str, ...]
+    ) -> tuple[str, float] | None:
+        """Latest reading of the first channel among `channels` whose role is
+        in `roles` (in that order of preference), converted to F by its
+        unit."""
+        by_role = {zone_channel_role(c): c for c in channels}
+        for role in roles:
+            channel = by_role.get(role)
+            if channel is None:
+                continue
+            entry = self.data[house_alias][channel]
+            if not entry["values"]:
+                continue
+            f = temperature_f(
+                entry.get("unit_type"), entry.get("unit"), entry["values"][-1]
+            )
+            if f is None:
+                print(f"-- {channel}: unit {entry.get('unit')} is not a temperature")
+                continue
+            return channel, f
+        return None
 
     def reference_now(self) -> pendulum.DateTime:
         """Datetime used anywhere we meant 'now' for alert windows (frozen when SIMULATING)."""
@@ -366,7 +387,8 @@ class AlertGenerator:
             return
 
         entry = self.data.setdefault(house_alias, {}).setdefault(
-            channel_name, {"times": [], "values": []}
+            channel_name,
+            {"times": [], "values": [], "unit": unit, "unit_type": unit_type},
         )
         entry["times"].append(timestamp_ms)
         entry["values"].append(value)
@@ -610,6 +632,7 @@ class AlertGenerator:
         start = end.add(hours=-self.hours_back)
         self.freshness_end_ms = int(end.timestamp() * 1000)
         self.latest_data_ms = {}
+        fetch_started = time.perf_counter()
         with next(get_db()) as session:
             rows = (
                 session.query(
@@ -637,6 +660,10 @@ class AlertGenerator:
             if house_alias is None or house_alias in self.ignored_house_aliases:
                 continue
             self.latest_data_ms[house_alias] = int(latest.timestamp() * 1000)
+        print(
+            f"Freshness query: {len(self.latest_data_ms)} houses "
+            f"in {time.perf_counter() - fetch_started:.1f}s"
+        )
 
     def check_no_data(self):
         alert_alias = "no_data"
@@ -694,50 +721,41 @@ class AlertGenerator:
                         print(f"-- {zone} is not a critical zone")
                         continue
 
-                setpoint = 0
-                temperature = 0
-                found_setpoint = False
-                found_temperature = False
-                for channel in channels_by_zone[zone]:
-                    if "set" in channel:
-                        values = self.data[house_alias][channel]["values"]
-                        if values:
-                            setpoint = values[-1] / 1000
-                            found_setpoint = True
-                    if "temp" in channel and "gw" not in channel:
-                        values = self.data[house_alias][channel]["values"]
-                        if values:
-                            temperature = values[-1] / 1000
-                            found_temperature = True
-                
-                # if not found_temperature:
-                #     for channel in channels_by_zone[zone]:
-                #         if 'gw-temp' in channel:
-                #             values = self.data[house_alias][channel]["values"]
-                #             if values:
-                #                 temperature = values[-1] / 1000
-                #                 found_temperature = True
-
-                if not found_setpoint:
+                # The zone's temperature: a smart-thermostat reading, else the
+                # floor sensor. The gw-temp channel is not used here.
+                found_setpoint = self.zone_temperature_f(
+                    house_alias, channels_by_zone[zone], ("setpoint",)
+                )
+                found_temperature = self.zone_temperature_f(
+                    house_alias, channels_by_zone[zone], ("air", "floor")
+                )
+                if found_setpoint is None:
                     print(f"-- {zone}: Missing setpoint channel or readings")
                     continue
-                if not found_temperature:
+                if found_temperature is None:
                     print(f"-- {zone}: Missing temperature channel or readings")
                     continue
+                setpoint_channel, setpoint = found_setpoint
+                _, temperature = found_temperature
 
                 if setpoint - temperature < self.max_setpoint_violation_f:
                     print(f"-- {zone} is ok")
                     self.alert_status[house_alias][alert_alias][zone] = False
-                else:                    
-                    # Check for a recent setpoint increase 
-                    setpoint_channel: str = [x for x in channels_by_zone[zone] if "set" in x][0]
-                    if len(set(self.data[house_alias][setpoint_channel]["values"])) == 1:
+                else:
+                    # Check for a recent setpoint increase
+                    setpoint_entry = self.data[house_alias][setpoint_channel]
+                    if len(set(setpoint_entry["values"])) == 1:
                         if not self.alert_status[house_alias][alert_alias][zone]:
                             alert_message = f"{setpoint_channel.replace('-set','')} is significantly below setpoint"
                             self.send_alert(alert_message, house_alias, alert_alias+f"_{zone}")
                             self.alert_status[house_alias][alert_alias][zone] = True
                     else:
-                        setpoint_values = [x/1000 for x in self.data[house_alias][setpoint_channel]["values"]]
+                        setpoint_values = [
+                            temperature_f(
+                                setpoint_entry["unit_type"], setpoint_entry["unit"], v
+                            )
+                            for v in setpoint_entry["values"]
+                        ]
                         if min(setpoint_values) < setpoint_values[-1] and min(setpoint_values)-temperature < self.max_setpoint_violation_f:
                             print(f"-- {zone} is significantly below setpoint but the setpoint was increased recently")
                         else:
@@ -773,20 +791,13 @@ class AlertGenerator:
                     self.alert_status[house_alias][alert_alias][zone] = False
 
                 freezing_threshold = 40
-                temperature = 60
-                found_temperature = False
-                for channel in channels_by_zone[zone]:
-                    if "temp" in channel and "gw" not in channel:
-                        temperature = self.data[house_alias][channel]["values"][-1] / 1000
-                        found_temperature = True
-                if not found_temperature:
-                    for channel in channels_by_zone[zone]:
-                        if 'gw-temp' in channel:
-                            temperature = self.to_fahrenheit(self.data[house_alias][channel]["values"][-1] / 100)
-                            found_temperature = True
-                if not found_temperature:
+                found_temperature = self.zone_temperature_f(
+                    house_alias, channels_by_zone[zone], ("air", "floor", "gw")
+                )
+                if found_temperature is None:
                     print(f"-- {zone}: Missing temperature channel")
                     continue
+                _, temperature = found_temperature
 
                 if freezing_threshold <= temperature:
                     print(f"-- {zone} is ok")
