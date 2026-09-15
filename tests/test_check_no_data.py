@@ -11,9 +11,7 @@ def make_generator(
     monkeypatch, *, latest_ms: int, end_ms: int = END_MS
 ) -> tuple[AlertGenerator, list[str]]:
     """One house whose newest alert-channel reading is at latest_ms."""
-    gen = AlertGenerator.__new__(AlertGenerator)
-    gen.max_time_no_data = 10 * 60
-    gen.alert_status = {}
+    gen = AlertGenerator()  # binds the session factory only; no connection is made
     gen.freshness_end_ms = end_ms
     gen.latest_data_ms = {HOUSE: latest_ms}
     sent: list[str] = []

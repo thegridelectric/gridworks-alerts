@@ -114,7 +114,6 @@ class AlertGenerator:
         self.data = {}
         self.relays = {}
         self.alert_status = {}
-        self.main()
 
     def send_alert(self, message, house_alias, alert_alias, time_sent=None):
         """Raise an alert on every channel: Opsgenie (fallback) and alert-manager."""
@@ -1296,7 +1295,7 @@ class AlertGenerator:
 
 
 def main() -> None:
-    AlertGenerator()
+    AlertGenerator().main()
 
 
 if __name__ == "__main__":
