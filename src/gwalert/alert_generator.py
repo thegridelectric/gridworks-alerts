@@ -7,7 +7,7 @@ from typing import NamedTuple
 import dotenv
 import pendulum
 import requests
-from sqlalchemy import and_, asc, desc, or_
+from sqlalchemy import and_, asc, desc, func, or_
 
 from gwalert.config import DEFAULT_ENV_FILE, Settings
 from gwalert.db import configure, get_db
@@ -91,8 +91,10 @@ class AlertGenerator:
         self.max_time_no_data = 10*60 #TODO nyquist
         self.main_loop_seconds = 5*60
         self.hours_back = 2
-        # unix ms; end of the last fetch's query window (get_data_from_journaldb)
-        self.data_end_ms = 0
+        # Set by fetch_latest_data: the freshness query's window end (unix ms)
+        # and each house's newest alert-channel reading inside that window.
+        self.freshness_end_ms = 0
+        self.latest_data_ms: dict[str, int] = {}
         self.query_batch_size = 2000
         self.max_setpoint_violation_f = 2
         self.min_dist_pump_w = 2
@@ -377,7 +379,6 @@ class AlertGenerator:
         start = time_now.add(hours=-self.hours_back)
         end = time_now
         end_ms = int(end.timestamp() * 1000)
-        self.data_end_ms = end_ms
 
         self.reports = []
         self.layout_lites = []
@@ -598,48 +599,65 @@ class AlertGenerator:
             print(f"An error occured while checking for glitches: {e}")
             return
 
+    def fetch_latest_data(self) -> None:
+        """One aggregate query: each house's newest alert-channel reading.
+
+        Runs before (and independently of) the full readings fetch, so the
+        freshness verdict costs one row per house and cannot be aged by a slow
+        transfer of the full window. Houses with no reading in the window are
+        absent from the result, as they are absent from the full fetch.
+        """
+        end = self.reference_now()
+        start = end.add(hours=-self.hours_back)
+        self.freshness_end_ms = int(end.timestamp() * 1000)
+        self.latest_data_ms = {}
+        with next(get_db()) as session:
+            rows = (
+                session.query(
+                    ReadingChannelSql.terminal_asset_alias,
+                    func.max(ReadingSql.timestamp),
+                )
+                .join(
+                    ReadingChannelSql,
+                    ReadingSql.channel_id == ReadingChannelSql.id,
+                )
+                .filter(
+                    ReadingSql.timestamp >= start,
+                    ReadingSql.timestamp <= end,
+                    ReadingChannelSql.terminal_asset_alias.like(
+                        f"{HOUSE_PREFIX}.%.ta"
+                    ),
+                    ReadingChannelSql.deactivated_date.is_(None),
+                    _alert_reading_channel_filter(),
+                )
+                .group_by(ReadingChannelSql.terminal_asset_alias)
+                .all()
+            )
+        for terminal_asset, latest in rows:
+            house_alias = self._house_alias_from_terminal_asset(terminal_asset)
+            if house_alias is None or house_alias in self.ignored_house_aliases:
+                continue
+            self.latest_data_ms[house_alias] = int(latest.timestamp() * 1000)
+
     def check_no_data(self):
         alert_alias = "no_data"
         print("\nChecking for data...")
-        for house_alias in self.selected_house_aliases:
-            if alert_alias not in self.alert_status[house_alias]:
-                self.alert_status[house_alias][alert_alias] = False
-
-            # Freshness is judged against the fetch window's end, not the clock
-            # now: the fetch drops rows stamped after its window, so a slow
-            # fetch would otherwise age fresh data past the threshold.
-            most_recent_ms = 0
-            end_ms = self.data_end_ms
-            for channel in self.data[house_alias]:
-                if channel in FORECAST_CHANNEL_NAMES:
-                    continue
-                times = self.data[house_alias][channel]["times"]
-                if not times:
-                    continue
-                channel_most_recent = times[-1]
-                if channel_most_recent > end_ms:
-                    continue
-                if channel_most_recent > most_recent_ms:
-                    most_recent_ms = channel_most_recent
+        end_ms = self.freshness_end_ms
+        for house_alias, most_recent_ms in sorted(self.latest_data_ms.items()):
+            house_status = self.alert_status.setdefault(house_alias, {})
+            house_status.setdefault(alert_alias, False)
             age_minutes = round((end_ms - most_recent_ms) / 1000 / 60, 1)
 
-            if not self.data[house_alias]:
-                if not self.alert_status[house_alias][alert_alias]:
-                    alert_message = f"No data found in the last {self.hours_back} hour(s)"
-                    self.send_alert(alert_message, house_alias, alert_alias)
-                    self.alert_status[house_alias][alert_alias] = True
-
-            elif (end_ms - most_recent_ms) / 1000 > self.max_time_no_data:
-                if not self.alert_status[house_alias][alert_alias]:
+            if (end_ms - most_recent_ms) / 1000 > self.max_time_no_data:
+                if not house_status[alert_alias]:
                     alert_message = (
                         f"No data coming in since {age_minutes} minutes"
                     )
                     self.send_alert(alert_message, house_alias, alert_alias)
-                    self.alert_status[house_alias][alert_alias] = True
-
+                    house_status[alert_alias] = True
             else:
                 print(f"- {house_alias}: Found data up to {age_minutes} minutes ago")
-                self.alert_status[house_alias][alert_alias] = False
+                house_status[alert_alias] = False
 
     def check_zone_below_setpoint(self):
         alert_alias = "zone_setpoint"
@@ -1249,8 +1267,9 @@ class AlertGenerator:
         while True:
             print(f"\n-------------- CHECKS START {self.reference_now().format('YYYY-MM-DD HH:mm:ss')} --------------")
             try:
-                self.get_data_from_journaldb()
+                self.fetch_latest_data()
                 self.check_no_data()
+                self.get_data_from_journaldb()
                 self.check_for_glitches()
                 self.check_zone_below_setpoint()
                 self.check_zone_freezing()

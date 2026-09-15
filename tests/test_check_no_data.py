@@ -1,29 +1,21 @@
-"""check_no_data judges freshness against the fetch window, not the clock after."""
+"""check_no_data judges freshness against its own query window, not the clock after."""
 
 from gwalert.alert_generator import AlertGenerator
 
 HOUSE = "beech"
 MINUTE_MS = 60_000
+END_MS = 1_789_480_800_000
 
 
 def make_generator(
-    monkeypatch, *, end_ms: int, latest_ms: int
+    monkeypatch, *, latest_ms: int, end_ms: int = END_MS
 ) -> tuple[AlertGenerator, list[str]]:
-    """One house, newest reading at latest_ms, fetch window ending at end_ms."""
+    """One house whose newest alert-channel reading is at latest_ms."""
     gen = AlertGenerator.__new__(AlertGenerator)
     gen.max_time_no_data = 10 * 60
-    gen.hours_back = 2
-    gen.selected_house_aliases = [HOUSE]
-    gen.alert_status = {HOUSE: {}}
-    gen.data = {
-        HOUSE: {
-            "zone1-temp": {
-                "times": [latest_ms - MINUTE_MS, latest_ms],
-                "values": [1, 2],
-            }
-        }
-    }
-    gen.data_end_ms = end_ms
+    gen.alert_status = {}
+    gen.freshness_end_ms = end_ms
+    gen.latest_data_ms = {HOUSE: latest_ms}
     sent: list[str] = []
     monkeypatch.setattr(
         gen, "send_alert", lambda message, house, alias: sent.append(message)
@@ -31,33 +23,27 @@ def make_generator(
     return gen, sent
 
 
-def test_slow_fetch_does_not_alert_on_fresh_data(monkeypatch) -> None:
-    # Newest reading 4 min before the window end; the fetch then took 6 min.
-    end_ms = 1_789_480_800_000
-    gen, sent = make_generator(
-        monkeypatch, end_ms=end_ms, latest_ms=end_ms - 4 * MINUTE_MS
-    )
-    monkeypatch.setattr(gen, "reference_epoch", lambda: (end_ms + 6 * MINUTE_MS) / 1000)
+def test_slow_full_fetch_does_not_age_fresh_data(monkeypatch) -> None:
+    # Newest reading 4 min before the window end; the clock is 6 min past it.
+    gen, sent = make_generator(monkeypatch, latest_ms=END_MS - 4 * MINUTE_MS)
+    monkeypatch.setattr(gen, "reference_epoch", lambda: (END_MS + 6 * MINUTE_MS) / 1000)
     gen.check_no_data()
     assert sent == []
     assert gen.alert_status[HOUSE]["no_data"] is False
 
 
-def test_stale_data_at_window_end_alerts(monkeypatch) -> None:
-    end_ms = 1_789_480_800_000
-    gen, sent = make_generator(
-        monkeypatch, end_ms=end_ms, latest_ms=end_ms - 11 * MINUTE_MS
-    )
+def test_stale_data_at_window_end_alerts_once(monkeypatch) -> None:
+    gen, sent = make_generator(monkeypatch, latest_ms=END_MS - 11 * MINUTE_MS)
+    gen.check_no_data()
     gen.check_no_data()
     assert sent == ["No data coming in since 11.0 minutes"]
     assert gen.alert_status[HOUSE]["no_data"] is True
 
 
-def test_readings_after_window_end_are_ignored(monkeypatch) -> None:
-    end_ms = 1_789_480_800_000
-    gen, sent = make_generator(
-        monkeypatch, end_ms=end_ms, latest_ms=end_ms - 11 * MINUTE_MS
-    )
-    gen.data[HOUSE]["zone1-temp"]["times"].append(end_ms + MINUTE_MS)
+def test_data_returning_clears_the_alert_state(monkeypatch) -> None:
+    gen, sent = make_generator(monkeypatch, latest_ms=END_MS - 11 * MINUTE_MS)
+    gen.check_no_data()
+    gen.latest_data_ms[HOUSE] = END_MS - MINUTE_MS
     gen.check_no_data()
     assert len(sent) == 1
+    assert gen.alert_status[HOUSE]["no_data"] is False
