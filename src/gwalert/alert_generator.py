@@ -91,6 +91,8 @@ class AlertGenerator:
         self.max_time_no_data = 10*60 #TODO nyquist
         self.main_loop_seconds = 5*60
         self.hours_back = 2
+        # unix ms; end of the last fetch's query window (get_data_from_journaldb)
+        self.data_end_ms = 0
         self.query_batch_size = 2000
         self.max_setpoint_violation_f = 2
         self.min_dist_pump_w = 2
@@ -375,6 +377,7 @@ class AlertGenerator:
         start = time_now.add(hours=-self.hours_back)
         end = time_now
         end_ms = int(end.timestamp() * 1000)
+        self.data_end_ms = end_ms
 
         self.reports = []
         self.layout_lites = []
@@ -602,8 +605,11 @@ class AlertGenerator:
             if alert_alias not in self.alert_status[house_alias]:
                 self.alert_status[house_alias][alert_alias] = False
 
+            # Freshness is judged against the fetch window's end, not the clock
+            # now: the fetch drops rows stamped after its window, so a slow
+            # fetch would otherwise age fresh data past the threshold.
             most_recent_ms = 0
-            now_ms = int(self.reference_epoch() * 1000)
+            end_ms = self.data_end_ms
             for channel in self.data[house_alias]:
                 if channel in FORECAST_CHANNEL_NAMES:
                     continue
@@ -611,10 +617,11 @@ class AlertGenerator:
                 if not times:
                     continue
                 channel_most_recent = times[-1]
-                if channel_most_recent > now_ms:
+                if channel_most_recent > end_ms:
                     continue
                 if channel_most_recent > most_recent_ms:
                     most_recent_ms = channel_most_recent
+            age_minutes = round((end_ms - most_recent_ms) / 1000 / 60, 1)
 
             if not self.data[house_alias]:
                 if not self.alert_status[house_alias][alert_alias]:
@@ -622,14 +629,16 @@ class AlertGenerator:
                     self.send_alert(alert_message, house_alias, alert_alias)
                     self.alert_status[house_alias][alert_alias] = True
 
-            elif self.reference_epoch() - most_recent_ms/1000 > self.max_time_no_data:
+            elif (end_ms - most_recent_ms) / 1000 > self.max_time_no_data:
                 if not self.alert_status[house_alias][alert_alias]:
-                    alert_message = f"No data coming in since {round((self.reference_epoch()-most_recent_ms/1000)/60,1)} minutes"
+                    alert_message = (
+                        f"No data coming in since {age_minutes} minutes"
+                    )
                     self.send_alert(alert_message, house_alias, alert_alias)
                     self.alert_status[house_alias][alert_alias] = True
 
             else:
-                print(f"- {house_alias}: Found data up to {round((self.reference_epoch()-most_recent_ms/1000)/60,1)} minutes ago")
+                print(f"- {house_alias}: Found data up to {age_minutes} minutes ago")
                 self.alert_status[house_alias][alert_alias] = False
 
     def check_zone_below_setpoint(self):
