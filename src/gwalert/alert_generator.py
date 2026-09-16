@@ -118,7 +118,7 @@ class AlertGenerator:
 
     def send_alert(self, message, house_alias, alert_alias, time_sent=None):
         """Raise an alert on every channel: Opsgenie (fallback) and alert-manager."""
-        print(f"[ALERT] {message}")
+        print(f"[ALERT] {house_alias}: {message}")
         self.send_opsgenie_alert(message, house_alias, alert_alias)
         self.send_to_alert_manager(message, house_alias, alert_alias, time_sent)
 
@@ -147,7 +147,6 @@ class AlertGenerator:
             )
 
     def send_opsgenie_alert(self, message: str, house_alias: str, alert_alias: str):
-        print(f"- [ALERT] {message}")
         url = "https://api.opsgenie.com/v2/alerts"
         headers = {
             "Content-Type": "application/json",
@@ -163,7 +162,7 @@ class AlertGenerator:
         }
         response = requests.post(url, headers=headers, data=json.dumps(payload))
         if response.status_code == 202:
-            print("Alert sent successfully")
+            print(f"Opsgenie accepted alert {alias}")
         else:
             print(f"Failed to send alert. Status code: {response.status_code}, Response: {response.text}")
 
