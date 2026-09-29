@@ -83,6 +83,21 @@ class ParsedSnapshotSpaceheat(NamedTuple):
     snapshot: SnapshotSpaceheat
 
 
+# Which zone temperature a setpoint is judged against, by house, in order of
+# preference. The default is a smart-thermostat air reading, else the floor
+# sensor; the gw-temp sensor is not used. Spruce's zones have mechanical
+# dials, so the scada learns the setpoint as the gw-temp reading at the end
+# of each heat call; that setpoint is only meaningful against the same
+# sensor (the floor sensor there sits about 2 F under it and reads as a
+# violation on a room that is at setpoint). Hard-coded by house until the
+# layout vocabulary (a zone's setpoint source and thermostat kind) is
+# vendored here and the choice is read off the layout.
+SETPOINT_TEMPERATURE_ROLES_BY_HOUSE: dict[str, tuple[str, ...]] = {
+    "spruce": ("gw", "air", "floor"),
+}
+DEFAULT_SETPOINT_TEMPERATURE_ROLES: tuple[str, ...] = ("air", "floor")
+
+
 class AlertGenerator:
     def __init__(self):
         self.settings = Settings(_env_file=dotenv.find_dotenv(DEFAULT_ENV_FILE))
@@ -720,13 +735,15 @@ class AlertGenerator:
                         print(f"-- {zone} is not a critical zone")
                         continue
 
-                # The zone's temperature: a smart-thermostat reading, else the
-                # floor sensor. The gw-temp channel is not used here.
                 found_setpoint = self.zone_temperature_f(
                     house_alias, channels_by_zone[zone], ("setpoint",)
                 )
                 found_temperature = self.zone_temperature_f(
-                    house_alias, channels_by_zone[zone], ("air", "floor")
+                    house_alias,
+                    channels_by_zone[zone],
+                    SETPOINT_TEMPERATURE_ROLES_BY_HOUSE.get(
+                        house_alias, DEFAULT_SETPOINT_TEMPERATURE_ROLES
+                    ),
                 )
                 if found_setpoint is None:
                     print(f"-- {zone}: Missing setpoint channel or readings")

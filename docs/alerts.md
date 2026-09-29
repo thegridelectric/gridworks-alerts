@@ -89,6 +89,7 @@ Invalid payloads are skipped with a log line; the rest of the cycle continues.
 - When `layout.lite` has been seen for a house (`critical_zones_by_house[house].known`), **only critical zones** are checked.
 - When critical zones are not yet known, **all zones** with temp/setpoint channels are checked.
 - Zones without setpoint or temperature readings are skipped.
+- The temperature judged against the setpoint is the smart-thermostat air reading, else the floor sensor. **Spruce** is the exception: its setpoints are learned by the scada from the gw-temp reading at heat-call end, so they are judged against gw-temp first (`SETPOINT_TEMPERATURE_ROLES_BY_HOUSE`). Hard-coded per house until the layout vocabulary carries a zone's setpoint source.
 
 ---
 

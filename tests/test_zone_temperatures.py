@@ -121,3 +121,37 @@ def test_setpoint_check_is_ok_when_within_tolerance(monkeypatch) -> None:
     )
     gen.check_zone_below_setpoint()
     assert sent == []
+
+
+def test_spruce_learned_setpoint_is_judged_against_gw_temp(monkeypatch) -> None:
+    # Spruce 2026-09-28 19:48 ET: the scada learned the bedrooms setpoint as
+    # the gw-temp reading at heat-call end (68.93 F); the floor sensor read
+    # 66.74 F. The room is at setpoint; the floor sensor must not alert.
+    gen, sent = make_generator(
+        monkeypatch,
+        {
+            "zone1-bedrooms-set": channel(GW1, "FahrenheitX100", 6893),
+            "zone1-bedrooms-gw-temp": channel(SH, "CelsiusTimes100", 2052),
+            "zone1-bedrooms-floor-temp": channel(GW1, "FahrenheitX100", 6674),
+        },
+    )
+    gen.check_zone_below_setpoint()
+    assert sent == []
+    assert gen.alert_status[HOUSE]["zone_setpoint"]["zone1-bedrooms"] is False
+
+
+def test_other_houses_keep_judging_setpoint_against_air_then_floor(monkeypatch) -> None:
+    gen, sent = make_generator(
+        monkeypatch,
+        {
+            "zone1-bedrooms-set": channel(GW1, "FahrenheitX100", 6893),
+            "zone1-bedrooms-gw-temp": channel(SH, "CelsiusTimes100", 2052),
+            "zone1-bedrooms-floor-temp": channel(GW1, "FahrenheitX100", 6674),
+        },
+    )
+    gen.selected_house_aliases = ["maple"]
+    gen.data = {"maple": gen.data[HOUSE]}
+    gen.critical_zones_by_house = {"maple": {"known": False, "list": []}}
+    gen.alert_status = {"maple": {}}
+    gen.check_zone_below_setpoint()
+    assert sent == ["zone1-bedrooms is significantly below setpoint"]
