@@ -99,6 +99,7 @@ ENUM_VALUES_BY_TYPE: dict[str, list[str]] = {
         "SecondsX10",
         "Milliseconds",
     ],
+    "gw2.lc.top.state": ["Dormant", "Normal", "ScadaBlind", "Standby", "InBackup"],
     "hz.calc.method": ["BasicExpWeightedAvg", "BasicButterWorth", "UniformWindow"],
     "log.level": ["Critical", "Error", "Warning", "Info", "Debug", "Trace"],
     "relay.closed.or.open": ["RelayClosed", "RelayOpen"],
