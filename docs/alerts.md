@@ -17,9 +17,6 @@ Each cycle loads and parses data from the JournalKeeper journal database (`tsdb`
 | `readings` ⋈ `reading_channels` | Channel telemetry and relay state readings (replaces legacy `report` messages) |
 | `messages` (`layout.lite`) | Critical zone list, standby mode (`system_mode`) |
 | `messages` (`glitch`) | Critical SCADA glitches (separate query in `check_for_glitches`) |
-| `messages` (`snapshot.spaceheat`) | Spruce no-data check only (last **10 minutes**) |
-
-Forecast pseudo-channels (`forecast-ws`, `forecast-oat`) carry future timestamps and are excluded from the no-data freshness check.
 
 Invalid payloads are skipped with a log line; the rest of the cycle continues.
 
@@ -48,29 +45,7 @@ Invalid payloads are skipped with a log line; the rest of the cycle continues.
 
 ---
 
-### 2. No Data
-
-**Alias:** `no_data`
-
-**What it checks:** Whether telemetry is still flowing for each monitored house, plus Spruce separately.
-
-**Exact trigger (monitored houses):** Either:
-- No channel data was loaded for the house in the current cycle, or
-- The most recent channel reading is older than `max_time_no_data` seconds.
-
-**Exact trigger (Spruce):** No `snapshot.spaceheat` messages from `hw1.isone.me.versant.keene.spruce.scada` in the last **10 minutes**, or the newest snapshot is older than `max_time_no_data`.
-
-**Adjustable parameters:**
-- `max_time_no_data` (default: `600` s / 10 min)
-- `hours_back` (default: `2`): readings and layout lookback (Spruce uses a fixed 10-minute window)
-
-**What makes it turn off:** Fresh data arrives within the threshold.
-
-**Note:** Spruce is in `ignored_house_aliases` and excluded from `selected_house_aliases`, but is monitored explicitly in this check.
-
----
-
-### 3. Zone Below Setpoint
+### 2. Zone Below Setpoint
 
 **Alias:** `zone_setpoint` (per-zone suffix, e.g. `zone_setpoint_zone1-first`)
 
@@ -93,7 +68,7 @@ Invalid payloads are skipped with a log line; the rest of the cycle continues.
 
 ---
 
-### 4. Zone Freezing
+### 3. Zone Freezing
 
 **Alias:** `zone_freezing` (per-zone suffix)
 
@@ -112,7 +87,7 @@ Invalid payloads are skipped with a log line; the rest of the cycle continues.
 
 ---
 
-### 5. Distribution Pump
+### 4. Distribution Pump
 
 **Alias:** `dist_pump`
 
@@ -136,7 +111,7 @@ Invalid payloads are skipped with a log line; the rest of the cycle continues.
 
 ---
 
-### 6. Store Pump
+### 5. Store Pump
 
 **Alias:** `store_pump`
 
@@ -157,7 +132,7 @@ Invalid payloads are skipped with a log line; the rest of the cycle continues.
 
 ---
 
-### 7. Heat Pump Not Coming On
+### 6. Heat Pump Not Coming On
 
 **Alias:** `hp_on`
 
@@ -180,7 +155,7 @@ Invalid payloads are skipped with a log line; the rest of the cycle continues.
 
 ---
 
-### 8. HP On During On-Peak
+### 7. HP On During On-Peak
 
 **Alias:** `hp_onpeak` (may append `_{hour}`)
 
@@ -198,7 +173,7 @@ Invalid payloads are skipped with a log line; the rest of the cycle continues.
 
 ---
 
-### 9. Rebooting
+### 8. Rebooting
 
 **Alias:** `rebooting`
 
