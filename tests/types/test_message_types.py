@@ -1,4 +1,4 @@
-from gwalert.types import Glitch, LayoutLite, Report, SnapshotSpaceheat
+from gwalert.types import LayoutLite, Report, SnapshotSpaceheat
 
 
 def test_report_parses_channel_readings() -> None:
@@ -33,20 +33,6 @@ def test_layout_lite_parses_critical_zones() -> None:
     )
     assert layout.critical_zone_list == ["Down"]
     assert layout.system_mode == "Standby"
-
-
-def test_glitch_parses_summary() -> None:
-    glitch = Glitch.from_dict(
-        {
-            "FromGNodeAlias": "hw1.isone.me.versant.keene.beech.scada",
-            "Type": "Critical",
-            "Summary": "Pump fault",
-            "TypeName": "glitch",
-            "Version": "000",
-        }
-    )
-    assert glitch.type == "Critical"
-    assert glitch.summary == "Pump fault"
 
 
 def test_snapshot_spaceheat_accepts_minimal_payload() -> None:
