@@ -18,16 +18,12 @@ from gwalert.enum_decode import (
     map_top_state_for_relay5,
 )
 from gwalert.models import MessageSql, ReadingChannelSql, ReadingSql
-from gwalert.types import Glitch, LayoutLite, Report, SnapshotSpaceheat
+from gwalert.types import LayoutLite, Report, SnapshotSpaceheat
 from gwalert.units import temperature_f, zone_channel_role
 
 HOUSE_PREFIX = "hw1.isone.me.versant.keene"
 FORECAST_CHANNEL_NAMES = frozenset({"forecast-ws", "forecast-oat"})
 ALERT_SCALAR_CHANNELS = frozenset({
-    "dist-pump-pwr",
-    "dist-flow",
-    "store-pump-pwr",
-    "store-flow",
     "hp-idu-pwr",
     "hp-odu-pwr",
 })
@@ -72,12 +68,6 @@ class ParsedReport(NamedTuple):
     report: Report
 
 
-class ParsedGlitch(NamedTuple):
-    house_alias: str
-    message_persisted_ms: int
-    glitch: Glitch
-
-
 class ParsedSnapshotSpaceheat(NamedTuple):
     message_persisted_ms: int
     snapshot: SnapshotSpaceheat
@@ -108,10 +98,6 @@ class AlertGenerator:
         self.hours_back = 2
         self.query_batch_size = 2000
         self.max_setpoint_violation_f = 2
-        self.min_dist_pump_w = 2
-        self.min_store_pump_w = 5
-        self.min_dist_pump_gpm = 0.5
-        self.min_store_pump_gpm = 0.5
         self.min_hp_kw = 1
         self.on_peak_hours = [7,8,9,10,11,16,17,18,19]
         self.whitewire_threshold_watts = {'beech': 100, 'default': 20, 'elm': 0.9}
@@ -257,21 +243,6 @@ class AlertGenerator:
             return source.split(".")[-1]
         print(f"Unknown source: {source}")
         return None
-
-    def _parse_glitch_message(self, message: MessageSql) -> ParsedGlitch | None:
-        try:
-            glitch = Glitch.from_dict(message.payload)
-        except ValueError as e:
-            print(f"Skipping invalid glitch from {message.from_alias}: {e}")
-            return None
-        house_alias = self._house_alias_from_g_node_alias(glitch.from_g_node_alias)
-        if house_alias is None:
-            return None
-        return ParsedGlitch(
-            house_alias=house_alias,
-            message_persisted_ms=self._message_timestamp_ms(message),
-            glitch=glitch,
-        )
 
     def _parse_snapshot_spaceheat_message(
         self, message: MessageSql
@@ -549,86 +520,6 @@ class AlertGenerator:
             else:
                 print(f"- {house_alias}: Did not find any data")
 
-    def check_for_glitches(self):
-        alert_alias = "critical_glitch"
-        print("\nChecking for glitches...")
-        for house_alias in self.selected_house_aliases:
-            if alert_alias not in self.alert_status[house_alias]:
-                self.alert_status[house_alias][alert_alias] = {}
-
-            expired_glitches = []
-            for active_critical_glitch in self.alert_status[house_alias][alert_alias]:
-                if self.reference_epoch() - self.alert_status[house_alias][alert_alias][active_critical_glitch] > self.hours_back*60*60:
-                    expired_glitches.append(active_critical_glitch)
-            for active_critical_glitch in expired_glitches:
-                self.alert_status[house_alias][alert_alias].pop(active_critical_glitch)
-
-        try:
-            message_aliases = []
-            for house_alias in self.selected_house_aliases:
-                message_aliases.extend([
-                    f"hw1.isone.me.versant.keene.{house_alias}",
-                    f"hw1.isone.me.versant.keene.{house_alias}.scada",
-                    f"hw1.isone.me.versant.keene.{house_alias}.scada.s2",
-                ])
-            with next(get_db()) as session:
-                start = self.reference_now().add(hours=-self.hours_back)
-                glitch_query = (
-                    session.query(MessageSql)
-                    .filter(
-                        MessageSql.message_type_name == "glitch",
-                        MessageSql.from_alias.in_(message_aliases),
-                        MessageSql.timestamp >= start,
-                    )
-                    .order_by(asc(MessageSql.timestamp))
-                )
-                glitch_total = glitch_skipped = 0
-                parsed_glitches = []
-                for m in glitch_query.yield_per(self.query_batch_size):
-                    glitch_total += 1
-                    parsed = self._parse_glitch_message(m)
-                    if parsed is None:
-                        glitch_skipped += 1
-                        continue
-                    parsed_glitches.append(parsed)
-                if not parsed_glitches:
-                    print("No glitches found")
-                else:
-                    critical_count = sum(
-                        1
-                        for p in parsed_glitches
-                        if p.glitch.type == "Critical"
-                    )
-                    print(
-                        f"Found {len(parsed_glitches)} glitches "
-                        f"({glitch_skipped} skipped), "
-                        f"of which {critical_count} are critical"
-                    )
-                for parsed in parsed_glitches:
-                    house_alias = parsed.house_alias
-                    if house_alias not in self.alert_status:
-                        continue
-                    summary = parsed.glitch.summary
-                    time_received = int(parsed.message_persisted_ms / 1000)
-                    unique_id = f"{house_alias}-{summary}"
-                    if (
-                        parsed.glitch.type == "Critical"
-                        and unique_id
-                        not in self.alert_status[house_alias][alert_alias]
-                    ):
-                        self.send_alert(
-                            f"Critical glitch: {summary}",
-                            house_alias,
-                            alert_alias,
-                            time_sent=time_received,
-                        )
-                        self.alert_status[house_alias][alert_alias][
-                            unique_id
-                        ] = time_received
-        except Exception as e:
-            print(f"An error occured while checking for glitches: {e}")
-            return
-
     def check_zone_below_setpoint(self):
         alert_alias = "zone_setpoint"
         print("\nChecking for zones below setpoint...")
@@ -753,202 +644,6 @@ class AlertGenerator:
                         alert_message = f"{zone} is below 40F"
                         self.send_alert(alert_message, house_alias, alert_alias+f"_{zone}")
                         self.alert_status[house_alias][alert_alias][zone] = True
-
-    def check_dist_pump(self):
-        alert_alias = "dist_pump"
-        print("\nChecking for distribution pump activity...")
-        for house_alias in self.selected_house_aliases:
-            print(f"- {house_alias}:")
-
-            if house_alias in self.houses_in_standby:
-                print(f"-- {house_alias} is in Standby, skipping")
-                continue
-
-            if alert_alias not in self.alert_status[house_alias]:
-                self.alert_status[house_alias][alert_alias] = 0
-
-            if house_alias in self.whitewire_threshold_watts:
-                threshold = self.whitewire_threshold_watts[house_alias]
-            else:
-                threshold = self.whitewire_threshold_watts['default']
-
-            last_heatcall_time = 0
-            for zone_state in [x for x in self.data[house_alias] if 'zone' in x and 'whitewire' in x]:
-                channel = self.data[house_alias][zone_state]
-                channel['values'] = [int(abs(x)>threshold) for x in channel['values']]
-                min_heatcall_ms = 15 * 60 * 1000
-                pairs = list(zip(channel['times'], channel['values']))
-                zone_heatcall_times = []
-                i = 0
-                while i < len(pairs):
-                    if pairs[i][1] != 1:
-                        i += 1
-                        continue
-                    run_start_ms = pairs[i][0]
-                    j = i
-                    while j < len(pairs) and pairs[j][1] == 1:
-                        j += 1
-                    cutoff_ms = run_start_ms + min_heatcall_ms
-                    for k in range(i, j):
-                        tk, _ = pairs[k]
-                        if tk >= cutoff_ms:
-                            zone_heatcall_times.append(tk)
-                    i = j
-                no_heatcall_times = [t for t, state in zip(channel['times'], channel['values']) if state==0]
-                valid_zone_heatcall_times = [t for t in zone_heatcall_times if self.reference_epoch()-t/1000 >= 5*60]
-                if valid_zone_heatcall_times:
-                    zone_last_heatcall_time = max(valid_zone_heatcall_times)
-                else:
-                    continue
-                no_heatcall_times_before_heatcall = [t for t in no_heatcall_times if t<=zone_last_heatcall_time]
-                if no_heatcall_times_before_heatcall:
-                    last_no_heatcall_time_before_heatcall = max(no_heatcall_times_before_heatcall)
-                    heatcall_on = [t for t in zone_heatcall_times if t>=last_no_heatcall_time_before_heatcall]
-                    if heatcall_on:
-                        start_of_heatcall = min(heatcall_on)
-                    else:
-                        start_of_heatcall = last_no_heatcall_time_before_heatcall
-                    # print(f"-- {zone_state} Start of heatcall: {self.unix_ms_to_date(start_of_heatcall)}")
-                    # print(f"-- {zone_state} End of heatcall: {self.unix_ms_to_date(zone_last_heatcall_time)}")
-                    last_heatcall_length = max(0, zone_last_heatcall_time - start_of_heatcall)/1000
-                    # print(f"-- {zone_state} Heat call length: {round(last_heatcall_length/60,1)} minutes")
-                    if last_heatcall_length < 5*60:
-                        # print(f"-- {zone_state} Heat call was less than 5 minutes long. Skip.")
-                        continue
-                if zone_last_heatcall_time > last_heatcall_time:
-                    last_heatcall_time = zone_last_heatcall_time
-
-            if 'dist-pump-pwr' not in self.data[house_alias] or 'dist-flow' not in self.data[house_alias]:
-                print(f"{house_alias}: Missing data!")
-                continue
-
-            if last_heatcall_time == 0:
-                print(f"-- No recent heat call or too short/recent heat call to tell")
-                continue
-
-            print(f"Last heat call time: {self.unix_ms_to_date(last_heatcall_time)}")
-
-            # Try to find power around the latest heat call
-            pwr = self.data[house_alias]['dist-pump-pwr']
-            power_around_heatcall = [
-                power for time, power in zip(pwr['times'], pwr['values']) 
-                if time >= last_heatcall_time - 5*60*1000
-            ]
-            found_power_after_heatcall = False
-            if not power_around_heatcall and pwr['values'][-1] <= self.min_dist_pump_w:
-                print(f"-- No pump power recorded around heat call and latest power is low")
-            elif power_around_heatcall and max(power_around_heatcall) <= self.min_dist_pump_w:
-                print(f"-- No significant pump power around heat call")
-            else:
-                print(f"-- Found dist pump power after last heat call")
-                found_power_after_heatcall = True
-
-            # Try to find flow around the latest heat call
-            flow = self.data[house_alias]['dist-flow']
-            flow_around_heatcall = [
-                flow/100 for time, flow in zip(flow['times'], flow['values']) 
-                if time >= last_heatcall_time - 5*60*1000
-            ]
-            if not flow_around_heatcall and flow['values'][-1] <= self.min_dist_pump_gpm:
-                print(f"-- No pump flow recorded around heat call and latest flow is low")
-                self.alert_status[house_alias][alert_alias] += 1
-            elif max(flow_around_heatcall) <= self.min_dist_pump_gpm:
-                print(f"-- No significant pump flow around heat call")
-                self.alert_status[house_alias][alert_alias] += 1
-            else:
-                print(f"-- Found dist pump flow after last heat call")
-                self.alert_status[house_alias][alert_alias] = 0
-                continue
-
-            if self.alert_status[house_alias][alert_alias] == 3:
-                alert_message = "No distribution pump flow recorded since the last heat call"
-                if found_power_after_heatcall:
-                    alert_message += ", but found pump power"
-                else:
-                    alert_message += ", and no pump power found"
-                self.send_alert(alert_message, house_alias, alert_alias)
-    
-    def check_store_pump(self):
-        alert_alias = "store_pump"
-        print("\nChecking for store pump activity...")
-        for house_alias in self.selected_house_aliases:
-            if alert_alias not in self.alert_status[house_alias]:
-                self.alert_status[house_alias][alert_alias] = False
-
-            if house_alias in self.houses_in_standby:
-                print(f"-- {house_alias} is in Standby, skipping")
-                continue
-
-            if 'relay9' not in self.relays[house_alias]:
-                print(f"{house_alias}: Missing relay9 data!")
-                continue
-
-            current_relay9_boss = list(self.relays[house_alias]['relay9'].keys())[0]
-            latest_relay_time = 0
-            for relay9_boss in self.relays[house_alias]['relay9']:
-                boss_latest_time = max(self.relays[house_alias]['relay9'][relay9_boss]['times'])
-                if boss_latest_time > latest_relay_time:
-                    latest_relay_time = boss_latest_time
-                    current_relay9_boss = relay9_boss
-
-            r = self.relays[house_alias]['relay9'][current_relay9_boss]
-            pairs = list(zip(r["times"], r["values"]))
-            time_since_in_current_state = next(
-                (pairs[i+1][0] for i in range(len(pairs) - 2, -1, -1) if pairs[i][1] != pairs[i+1][1]),
-                pairs[0][0],
-            )
-            relay9_state = r['values'][-1]
-
-            if 'store-pump-pwr' not in self.data[house_alias] or 'store-flow' not in self.data[house_alias]:
-                print(f"{house_alias}: Missing data!") # TODO: create an alert?
-                continue
-
-            if relay9_state == "Energized":
-                if self.reference_epoch() - time_since_in_current_state/1000 > 10*60:
-                    print(f"- {house_alias}: Relay 9 is energized since more than 10 minutes, expecting store flow")
-
-                    # Try to find power
-                    pwr = self.data[house_alias]['store-pump-pwr']
-                    power_since_pulled = [
-                        power for time, power in zip(pwr['times'], pwr['values'])
-                        if time >= time_since_in_current_state
-                    ]
-                    found_power_after_pulled = False
-                    if not power_since_pulled and pwr['values'][-1] <= self.min_store_pump_w:
-                        print(f"- {house_alias}: No pump power recorded after relay 9 was energized")
-                    elif max(power_since_pulled) <= self.min_store_pump_w:
-                        print(f"- {house_alias}: No significant pump power after relay 9 was energized")
-                    else:
-                        print(f"- {house_alias}: Found store pump power after relay 9 was energized")
-                        found_power_after_pulled = True
-
-                    # Try to find flow
-                    flow = self.data[house_alias]['store-flow']
-                    flow_since_pulled = [
-                        flow/100 for time, flow in zip(flow['times'], flow['values'])
-                        if time >= time_since_in_current_state
-                    ]
-                    if not flow_since_pulled and flow['values'][-1] <= self.min_store_pump_gpm:
-                        print(f"- {house_alias}: No pump flow recorded after relay 9 was energized")
-                    elif max(flow_since_pulled) <= self.min_store_pump_gpm:
-                        print(f"- {house_alias}: No significant pump flow after relay 9 was energized")
-                    else:
-                        print(f"- {house_alias}: Found store pump flow after relay 9 was energized")
-                        self.alert_status[house_alias][alert_alias] = False
-                        continue
-
-                    if not self.alert_status[house_alias][alert_alias]:
-                        alert_message = "No store pump flow since relay 9 was energized"
-                        if found_power_after_pulled:
-                            alert_message += ", but found pump power"
-                        else:
-                            alert_message += ", and no pump power found"
-                        self.send_alert(alert_message, house_alias, alert_alias)
-                        self.alert_status[house_alias][alert_alias] = True
-
-            elif relay9_state == "DeEnergized":
-                print(f"- {house_alias}: Relay 9 is de-energized, not expecting any store flow at the moment")
-                self.alert_status[house_alias][alert_alias] = False
 
     def check_hp(self):
         alert_alias = "hp_on"
@@ -1224,11 +919,8 @@ class AlertGenerator:
             print(f"\n-------------- CHECKS START {self.reference_now().format('YYYY-MM-DD HH:mm:ss')} --------------")
             try:
                 self.get_data_from_journaldb()
-                self.check_for_glitches()
                 self.check_zone_below_setpoint()
                 self.check_zone_freezing()
-                self.check_dist_pump()
-                self.check_store_pump()
                 self.check_hp()
                 self.check_hp_on_during_onpeak()
                 self.check_rebooting()
