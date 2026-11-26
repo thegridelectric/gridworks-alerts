@@ -922,7 +922,9 @@ class AlertGenerator:
                 self.check_zone_below_setpoint()
                 self.check_zone_freezing()
                 self.check_hp()
-                self.check_hp_on_during_onpeak()
+                # Disabled: on_peak_hours is a fixed weekday list, and the
+                # houses follow prices that do not match it.
+                # self.check_hp_on_during_onpeak()
                 self.check_rebooting()
                 # self.check_in_atn()
                 # self.check_no_more_oil()

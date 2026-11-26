@@ -159,6 +159,8 @@ Invalid payloads are skipped with a log line; the rest of the cycle continues.
 
 **Alias:** `hp_onpeak` (may append `_{hour}`)
 
+**Disabled:** the main loop does not run this check.
+
 **What it checks:** HP running during on-peak electricity hours.
 
 **Skipped when:** House is in standby.
